@@ -34,7 +34,7 @@ public sealed class TrackRuleEvaluator
     public TrackGenerationDecision EvaluateNextDecision(
         ref TrackGenerationState state,
         TrackGenerationProfile profile,
-        LevelGenerationSettings levelSettings,
+        ResolvedTrackSettings settings,
         System.Random random,
         float targetLength,
         float minTrackHeight,
