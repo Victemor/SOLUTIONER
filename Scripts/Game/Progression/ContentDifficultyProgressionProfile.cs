@@ -2,13 +2,11 @@ using UnityEngine;
 
 /// <summary>
 /// Perfil de progresión de dificultad para la generación procedural de contenido del track.
-/// 
+///
 /// Responsabilidades:
 /// - Definir los rangos progresivos de probabilidades de spawn por categoría.
 /// - Controlar a partir de qué nivel se habilita cada categoría de obstáculo.
 /// - Definir la progresión de monedas por nivel.
-///
-/// Este SO reemplaza la necesidad de crear un LevelContentGenerationSettings por cada nivel.
 /// </summary>
 [CreateAssetMenu(fileName = "ContentDifficultyProgressionProfile",
     menuName = "Game/Progression/Content Difficulty Progression Profile")]
@@ -30,7 +28,7 @@ public sealed class ContentDifficultyProgressionProfile : ScriptableObject
     [Tooltip("Nivel mínimo para generar ventiladores o aspas.")]
     [SerializeField, Min(1)] private int fansUnlockLevel = 5;
 
-    [Tooltip("Las monedas están disponibles desde el nivel 1.")]
+    [Tooltip("Nivel mínimo para generar monedas.")]
     [SerializeField, Min(1)] private int coinsUnlockLevel = 1;
 
     [Header("Obstacle Spawn Chances")]
@@ -61,100 +59,49 @@ public sealed class ContentDifficultyProgressionProfile : ScriptableObject
 
     [Header("Coins")]
 
-    [Tooltip("Cantidad mínima de monedas a generar (cuando se usa cantidad aleatoria).")]
+    [Tooltip("Cantidad mínima de monedas a generar por nivel.")]
     [SerializeField] private DifficultyParameterRange minCoinCount = DifficultyParameterRange.Linear(3f, 8f, 20);
 
-    [Tooltip("Cantidad máxima de monedas a generar (cuando se usa cantidad aleatoria).")]
+    [Tooltip("Cantidad máxima de monedas a generar por nivel.")]
     [SerializeField] private DifficultyParameterRange maxCoinCount = DifficultyParameterRange.Linear(6f, 18f, 25);
 
-    [Tooltip("Si está activo, la cantidad de monedas siempre es aleatoria dentro del rango. Si está desactivado, se usa la cantidad fija evaluada.")]
+    [Tooltip("Si está activo, la cantidad de monedas es aleatoria dentro del rango.")]
     [SerializeField] private bool useRandomCoinCount = true;
 
     #endregion
 
     #region Properties
 
-    /// <summary>Nivel de desbloqueo de cajas.</summary>
-    public int BoxesUnlockLevel => boxesUnlockLevel;
-
-    /// <summary>Nivel de desbloqueo de muros.</summary>
-    public int WallsUnlockLevel => wallsUnlockLevel;
-
-    /// <summary>Nivel de desbloqueo de pelotas.</summary>
-    public int BallsUnlockLevel => ballsUnlockLevel;
-
-    /// <summary>Nivel de desbloqueo de ventiladores.</summary>
-    public int FansUnlockLevel => fansUnlockLevel;
-
-    /// <summary>Nivel de desbloqueo de monedas.</summary>
-    public int CoinsUnlockLevel => coinsUnlockLevel;
-
-    /// <summary>Rango de probabilidad de spawn de cajas según nivel.</summary>
     public DifficultyParameterRange BoxSpawnChance => boxSpawnChance;
-
-    /// <summary>Rango de probabilidad de spawn de muros según nivel.</summary>
     public DifficultyParameterRange WallSpawnChance => wallSpawnChance;
-
-    /// <summary>Rango de probabilidad de pelota en pista plana según nivel.</summary>
     public DifficultyParameterRange BallFlatSpawnChance => ballFlatSpawnChance;
-
-    /// <summary>Rango de probabilidad de pelota en estrechamientos según nivel.</summary>
     public DifficultyParameterRange BallNarrowSpawnChance => ballNarrowSpawnChance;
-
-    /// <summary>Rango de probabilidad de pelota en railes según nivel.</summary>
     public DifficultyParameterRange BallRailSpawnChance => ballRailSpawnChance;
-
-    /// <summary>Rango de probabilidad de pelota antes de bajadas según nivel.</summary>
     public DifficultyParameterRange BallBeforeDownSlopeChance => ballBeforeDownSlopeChance;
-
-    /// <summary>Rango de probabilidad de ventilador en pista plana según nivel.</summary>
     public DifficultyParameterRange FanFlatSpawnChance => fanFlatSpawnChance;
-
-    /// <summary>Rango de probabilidad de ventilador en rail recto según nivel.</summary>
     public DifficultyParameterRange FanStraightRailSpawnChance => fanStraightRailSpawnChance;
-
-    /// <summary>Rango de cantidad mínima de monedas según nivel.</summary>
     public DifficultyParameterRange MinCoinCount => minCoinCount;
-
-    /// <summary>Rango de cantidad máxima de monedas según nivel.</summary>
     public DifficultyParameterRange MaxCoinCount => maxCoinCount;
-
-    /// <summary>Si la cantidad de monedas debe ser aleatoria dentro del rango.</summary>
     public bool UseRandomCoinCount => useRandomCoinCount;
 
     #endregion
 
-    #region Helpers
+    #region Unlock API
 
-    /// <summary>
-    /// Indica si una categoría de contenido está desbloqueada para el nivel dado.
-    /// </summary>
-    public bool IsCategoryUnlocked(ContentCategory category, int levelIndex)
-    {
-        return category switch
-        {
-            ContentCategory.Boxes => levelIndex >= boxesUnlockLevel,
-            ContentCategory.Walls => levelIndex >= wallsUnlockLevel,
-            ContentCategory.Balls => levelIndex >= ballsUnlockLevel,
-            ContentCategory.Fans => levelIndex >= fansUnlockLevel,
-            ContentCategory.Coins => levelIndex >= coinsUnlockLevel,
-            _ => true
-        };
-    }
+    /// <summary>Indica si las cajas están desbloqueadas para el nivel dado.</summary>
+    public bool IsBoxesUnlocked(int levelIndex) => levelIndex >= boxesUnlockLevel;
+
+    /// <summary>Indica si los muros están desbloqueados para el nivel dado.</summary>
+    public bool IsWallsUnlocked(int levelIndex) => levelIndex >= wallsUnlockLevel;
+
+    /// <summary>Indica si las pelotas empujables están desbloqueadas para el nivel dado.</summary>
+    public bool IsBallsUnlocked(int levelIndex) => levelIndex >= ballsUnlockLevel;
+
+    /// <summary>Indica si los ventiladores están desbloqueados para el nivel dado.</summary>
+    public bool IsFansUnlocked(int levelIndex) => levelIndex >= fansUnlockLevel;
+
+    /// <summary>Indica si las monedas están desbloqueadas para el nivel dado.</summary>
+    public bool IsCoinsUnlocked(int levelIndex) => levelIndex >= coinsUnlockLevel;
 
     #endregion
-}
-
-/// <summary>
-/// Categorías de contenido generables sobre el track.
-/// Declarada aquí porque ContentDifficultyProgressionProfile es su consumidor principal.
-/// Si ya existe una versión en TrackContentGenerator, consolidarlas en un archivo compartido.
-/// </summary>
-public enum ContentCategory
-{
-    Boxes,
-    Walls,
-    Balls,
-    Fans,
-    Coins
 }
