@@ -9,6 +9,9 @@ public sealed class TrackRuleEvaluator
 {
     #region Nested Types
 
+    /// <summary>
+    /// Candidato interno usado para selección ponderada.
+    /// </summary>
     private readonly struct Candidate
     {
         public TrackFeatureType FeatureType { get; }
@@ -31,13 +34,13 @@ public sealed class TrackRuleEvaluator
     public TrackGenerationDecision EvaluateNextDecision(
         ref TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings,
+        LevelGenerationSettings levelSettings,
         System.Random random,
         float targetLength,
         float minTrackHeight,
         float maxTrackHeight)
     {
-        float safeStartLength = ResolveSafeStartLength(profile, settings);
+        float safeStartLength = ResolveSafeStartLength(profile, levelSettings);
         if (state.GeneratedLength < safeStartLength)
         {
             return CreateStraightDecision(
@@ -46,7 +49,7 @@ public sealed class TrackRuleEvaluator
                 state.CurrentWidthRatio);
         }
 
-        float safeEndLength = ResolveSafeEndLength(profile, settings);
+        float safeEndLength = ResolveSafeEndLength(profile, levelSettings);
         float remainingToEnd = Mathf.Max(0f, targetLength - state.GeneratedLength);
 
         if (state.CurrentStructureType == TrackStructureType.RailTrack
@@ -66,7 +69,7 @@ public sealed class TrackRuleEvaluator
         List<Candidate> candidates = BuildCandidates(
             state,
             profile,
-            settings,
+            levelSettings,
             targetLength,
             minTrackHeight,
             maxTrackHeight);
@@ -84,7 +87,7 @@ public sealed class TrackRuleEvaluator
             selectedFeature,
             state,
             profile,
-            settings,
+            levelSettings,
             random,
             minTrackHeight,
             maxTrackHeight);
@@ -94,10 +97,13 @@ public sealed class TrackRuleEvaluator
 
     #region Candidate Build
 
+    /// <summary>
+    /// Construye la lista de candidatos válidos para el siguiente cambio.
+    /// </summary>
     private List<Candidate> BuildCandidates(
         TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings,
+        LevelGenerationSettings levelSettings,
         float targetLength,
         float minTrackHeight,
         float maxTrackHeight)
@@ -106,11 +112,19 @@ public sealed class TrackRuleEvaluator
 
         if (state.CurrentStructureType == TrackStructureType.RailTrack)
         {
-            BuildRailCandidates(candidates, state, profile, settings, targetLength, minTrackHeight, maxTrackHeight);
+            BuildRailCandidates(
+                candidates,
+                state,
+                profile,
+                levelSettings,
+                targetLength,
+                minTrackHeight,
+                maxTrackHeight);
+
             return candidates;
         }
 
-        BuildSolidCandidates(candidates, state, profile, settings, targetLength, minTrackHeight, maxTrackHeight);
+        BuildSolidCandidates(candidates, state, profile, levelSettings, targetLength, minTrackHeight, maxTrackHeight);
 
         if (candidates.Count == 0)
         {
@@ -120,29 +134,35 @@ public sealed class TrackRuleEvaluator
         return candidates;
     }
 
+    /// <summary>
+    /// Construye candidatos válidos mientras el generador está sobre pista sólida.
+    /// </summary>
     private void BuildSolidCandidates(
         List<Candidate> candidates,
         TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings,
+        LevelGenerationSettings levelSettings,
         float targetLength,
         float minTrackHeight,
         float maxTrackHeight)
     {
         candidates.Add(new Candidate(TrackFeatureType.Straight, 1f));
 
-        AddSolidLateralCandidates(candidates, state, profile, settings);
-        AddVerticalCandidates(candidates, state, profile, settings, minTrackHeight, maxTrackHeight);
-        AddWidthCandidates(candidates, state, profile, settings);
-        AddGapCandidate(candidates, state, profile, settings, targetLength);
-        AddRailStartCandidate(candidates, state, profile, settings, targetLength);
+        AddSolidLateralCandidates(candidates, state, profile, levelSettings);
+        AddVerticalCandidates(candidates, state, profile, levelSettings, minTrackHeight, maxTrackHeight);
+        AddWidthCandidates(candidates, state, profile, levelSettings);
+        AddGapCandidate(candidates, state, profile, levelSettings, targetLength);
+        AddRailStartCandidate(candidates, state, profile, levelSettings, targetLength);
     }
 
+    /// <summary>
+    /// Construye candidatos válidos mientras el generador está dentro de una secuencia rail.
+    /// </summary>
     private void BuildRailCandidates(
         List<Candidate> candidates,
         TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings,
+        LevelGenerationSettings levelSettings,
         float targetLength,
         float minTrackHeight,
         float maxTrackHeight)
@@ -156,8 +176,8 @@ public sealed class TrackRuleEvaluator
         candidates.Add(new Candidate(TrackFeatureType.RailSegment, 1f));
         candidates.Add(new Candidate(TrackFeatureType.RailEnd, 0.35f));
 
-        AddRailLateralCandidates(candidates, state, profile, settings);
-        AddRailVerticalCandidates(candidates, state, profile, settings, minTrackHeight, maxTrackHeight);
+        AddRailLateralCandidates(candidates, state, profile, levelSettings);
+        AddRailVerticalCandidates(candidates, state, profile, levelSettings, minTrackHeight, maxTrackHeight);
 
         float remainingToEnd = targetLength - state.GeneratedLength;
         if (remainingToEnd <= profile.SafeEndLength + profile.MinimumSectionLength + profile.MinStraightAfterRail)
@@ -167,21 +187,66 @@ public sealed class TrackRuleEvaluator
         }
     }
 
+    /// <summary>
+    /// Agrega candidatos verticales válidos mientras el generador está dentro de una secuencia rail.
+    /// </summary>
+    private void AddRailVerticalCandidates(
+        List<Candidate> candidates,
+        TrackGenerationState state,
+        TrackGenerationProfile profile,
+        LevelGenerationSettings levelSettings,
+        float minTrackHeight,
+        float maxTrackHeight)
+    {
+        if (state.DistanceSinceLastVerticalChange < profile.MinStraightAfterVerticalChange)
+        {
+            return;
+        }
+
+        float verticalChance =
+            profile.VerticalChangeChance
+            * levelSettings.VerticalChanceMultiplier
+            * levelSettings.DifficultyMultiplier
+            * profile.RailVerticalChanceMultiplier;
+
+        if (verticalChance <= 0f)
+        {
+            return;
+        }
+
+        float nextUpMinimum = state.CurrentHeight + profile.SlopeHeightStepMin;
+        float nextDownMinimum = state.CurrentHeight - profile.SlopeHeightStepMin;
+
+        if (nextUpMinimum <= maxTrackHeight)
+        {
+            candidates.Add(new Candidate(
+                TrackFeatureType.SlopeUp,
+                verticalChance * profile.SlopeUpWeight));
+        }
+
+        if (nextDownMinimum >= minTrackHeight)
+        {
+            candidates.Add(new Candidate(
+                TrackFeatureType.SlopeDown,
+                verticalChance * profile.SlopeDownWeight));
+        }
+    }
+
+    /// <summary>
+    /// Agrega candidatos laterales válidos en pista sólida.
+    /// </summary>
     private void AddSolidLateralCandidates(
         List<Candidate> candidates,
         TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings)
+        LevelGenerationSettings levelSettings)
     {
         if (state.DistanceSinceLastLateralChange < profile.MinStraightAfterLateralChange)
         {
             return;
         }
 
-        float lateralChance = profile.LateralChangeChance
-            * settings.LateralChanceMultiplier
-            * settings.DifficultyMultiplier;
-
+        float lateralChance = profile.LateralChangeChance * levelSettings.LateralChanceMultiplier * levelSettings.DifficultyMultiplier;
         if (lateralChance <= 0f)
         {
             return;
@@ -198,11 +263,14 @@ public sealed class TrackRuleEvaluator
             profile.Turn90Weight);
     }
 
+    /// <summary>
+    /// Agrega candidatos laterales válidos en estructura rail.
+    /// </summary>
     private void AddRailLateralCandidates(
         List<Candidate> candidates,
         TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings)
+        LevelGenerationSettings levelSettings)
     {
         if (state.DistanceSinceLastLateralChange < profile.MinStraightAfterLateralChange)
         {
@@ -210,9 +278,9 @@ public sealed class TrackRuleEvaluator
         }
 
         float lateralChance = profile.LateralChangeChance
-            * settings.LateralChanceMultiplier
-            * settings.DifficultyMultiplier
-            * profile.RailTurnChanceMultiplier;
+                              * levelSettings.LateralChanceMultiplier
+                              * levelSettings.DifficultyMultiplier
+                              * profile.RailTurnChanceMultiplier;
 
         if (lateralChance <= 0f)
         {
@@ -230,11 +298,65 @@ public sealed class TrackRuleEvaluator
             profile.Turn90Weight);
     }
 
+    /// <summary>
+    /// Agrega candidatos de giro según el estado lateral actual.
+    /// </summary>
+    private void AddLateralCandidatesForState(
+        List<Candidate> candidates,
+        TrackLateralState currentLateralState,
+        float currentYawOffsetDegrees,
+        float lateralChance,
+        float leftTurnWeight,
+        float rightTurnWeight,
+        float turn45Weight,
+        float turn90Weight)
+    {
+        float left45Weight = lateralChance * leftTurnWeight * turn45Weight;
+        float left90Weight = lateralChance * leftTurnWeight * turn90Weight;
+        float right45Weight = lateralChance * rightTurnWeight * turn45Weight;
+        float right90Weight = lateralChance * rightTurnWeight * turn90Weight;
+
+        switch (currentLateralState)
+        {
+            case TrackLateralState.Center:
+                candidates.Add(new Candidate(TrackFeatureType.LateralEnterLeft45, left45Weight));
+                candidates.Add(new Candidate(TrackFeatureType.LateralEnterLeft90, left90Weight));
+                candidates.Add(new Candidate(TrackFeatureType.LateralEnterRight45, right45Weight));
+                candidates.Add(new Candidate(TrackFeatureType.LateralEnterRight90, right90Weight));
+                break;
+
+            case TrackLateralState.Left:
+                if (Mathf.Approximately(currentYawOffsetDegrees, -45f))
+                {
+                    candidates.Add(new Candidate(TrackFeatureType.LateralReturnToCenterFromLeft45, lateralChance));
+                }
+                else if (Mathf.Approximately(currentYawOffsetDegrees, -90f))
+                {
+                    candidates.Add(new Candidate(TrackFeatureType.LateralReturnToCenterFromLeft90, lateralChance));
+                }
+                break;
+
+            case TrackLateralState.Right:
+                if (Mathf.Approximately(currentYawOffsetDegrees, 45f))
+                {
+                    candidates.Add(new Candidate(TrackFeatureType.LateralReturnToCenterFromRight45, lateralChance));
+                }
+                else if (Mathf.Approximately(currentYawOffsetDegrees, 90f))
+                {
+                    candidates.Add(new Candidate(TrackFeatureType.LateralReturnToCenterFromRight90, lateralChance));
+                }
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Agrega candidatos de pendiente válidos.
+    /// </summary>
     private void AddVerticalCandidates(
         List<Candidate> candidates,
         TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings,
+        LevelGenerationSettings levelSettings,
         float minTrackHeight,
         float maxTrackHeight)
     {
@@ -248,71 +370,38 @@ public sealed class TrackRuleEvaluator
             return;
         }
 
-        float verticalChance = profile.VerticalChangeChance
-            * settings.VerticalChanceMultiplier
-            * settings.DifficultyMultiplier;
-
+        float verticalChance = profile.VerticalChangeChance * levelSettings.VerticalChanceMultiplier * levelSettings.DifficultyMultiplier;
         if (verticalChance <= 0f)
         {
             return;
         }
 
-        float nextUpMinimum   = state.CurrentHeight + profile.SlopeHeightStepMin;
+        float nextUpMinimum = state.CurrentHeight + profile.SlopeHeightStepMin;
         float nextDownMinimum = state.CurrentHeight - profile.SlopeHeightStepMin;
 
         if (nextUpMinimum <= maxTrackHeight)
         {
-            candidates.Add(new Candidate(TrackFeatureType.SlopeUp,   verticalChance * profile.SlopeUpWeight));
+            candidates.Add(new Candidate(
+                TrackFeatureType.SlopeUp,
+                verticalChance * profile.SlopeUpWeight));
         }
 
         if (nextDownMinimum >= minTrackHeight)
         {
-            candidates.Add(new Candidate(TrackFeatureType.SlopeDown, verticalChance * profile.SlopeDownWeight));
+            candidates.Add(new Candidate(
+                TrackFeatureType.SlopeDown,
+                verticalChance * profile.SlopeDownWeight));
         }
     }
 
-    private void AddRailVerticalCandidates(
-        List<Candidate> candidates,
-        TrackGenerationState state,
-        TrackGenerationProfile profile,
-        ResolvedTrackSettings settings,
-        float minTrackHeight,
-        float maxTrackHeight)
-    {
-        if (state.DistanceSinceLastVerticalChange < profile.MinStraightAfterVerticalChange)
-        {
-            return;
-        }
-
-        float verticalChance = profile.VerticalChangeChance
-            * settings.VerticalChanceMultiplier
-            * settings.DifficultyMultiplier
-            * profile.RailVerticalChanceMultiplier;
-
-        if (verticalChance <= 0f)
-        {
-            return;
-        }
-
-        float nextUpMinimum   = state.CurrentHeight + profile.SlopeHeightStepMin;
-        float nextDownMinimum = state.CurrentHeight - profile.SlopeHeightStepMin;
-
-        if (nextUpMinimum <= maxTrackHeight)
-        {
-            candidates.Add(new Candidate(TrackFeatureType.SlopeUp,   verticalChance * profile.SlopeUpWeight));
-        }
-
-        if (nextDownMinimum >= minTrackHeight)
-        {
-            candidates.Add(new Candidate(TrackFeatureType.SlopeDown, verticalChance * profile.SlopeDownWeight));
-        }
-    }
-
+    /// <summary>
+    /// Agrega candidatos de estrechamiento válidos.
+    /// </summary>
     private void AddWidthCandidates(
         List<Candidate> candidates,
         TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings)
+        LevelGenerationSettings levelSettings)
     {
         if (state.DistanceSinceLastWidthChange < profile.MinStraightAfterWidthChange)
         {
@@ -324,10 +413,7 @@ public sealed class TrackRuleEvaluator
             return;
         }
 
-        float widthChance = profile.NarrowChance
-            * settings.NarrowChanceMultiplier
-            * settings.DifficultyMultiplier;
-
+        float widthChance = profile.NarrowChance * levelSettings.NarrowChanceMultiplier * levelSettings.DifficultyMultiplier;
         if (widthChance <= 0f)
         {
             return;
@@ -343,25 +429,52 @@ public sealed class TrackRuleEvaluator
         }
     }
 
+    /// <summary>
+    /// Agrega candidato de gap si es válido.
+    /// </summary>
     private void AddGapCandidate(
         List<Candidate> candidates,
         TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings,
+        LevelGenerationSettings levelSettings,
         float targetLength)
     {
-        if (state.DistanceSinceLastGap < profile.MinStraightAfterGap)            return;
-        if (state.CurrentStructureType != TrackStructureType.SolidTrack)         return;
-        if (!Mathf.Approximately(state.CurrentWidthRatio, 1f))                   return;
-        if (state.CurrentVerticalState != TrackVerticalState.Flat)               return;
-        if (state.GeneratedLength < profile.ForbidGapNearStartDistance)          return;
-        if (state.GeneratedLength > targetLength - profile.ForbidGapNearEndDistance) return;
-        if (state.DistanceSinceLastLateralChange < profile.ForbidGapAfterRecentHardChangeDistance) return;
+        if (state.DistanceSinceLastGap < profile.MinStraightAfterGap)
+        {
+            return;
+        }
 
-        float gapChance = profile.GapChance
-            * settings.GapChanceMultiplier
-            * settings.DifficultyMultiplier;
+        if (state.CurrentStructureType != TrackStructureType.SolidTrack)
+        {
+            return;
+        }
 
+        if (!Mathf.Approximately(state.CurrentWidthRatio, 1f))
+        {
+            return;
+        }
+
+        if (state.CurrentVerticalState != TrackVerticalState.Flat)
+        {
+            return;
+        }
+
+        if (state.GeneratedLength < profile.ForbidGapNearStartDistance)
+        {
+            return;
+        }
+
+        if (state.GeneratedLength > targetLength - profile.ForbidGapNearEndDistance)
+        {
+            return;
+        }
+
+        if (state.DistanceSinceLastLateralChange < profile.ForbidGapAfterRecentHardChangeDistance)
+        {
+            return;
+        }
+
+        float gapChance = profile.GapChance * levelSettings.GapChanceMultiplier * levelSettings.DifficultyMultiplier;
         if (gapChance <= 0f)
         {
             return;
@@ -370,24 +483,47 @@ public sealed class TrackRuleEvaluator
         candidates.Add(new Candidate(TrackFeatureType.Gap, gapChance));
     }
 
+    /// <summary>
+    /// Agrega candidato para comenzar una secuencia rail.
+    /// </summary>
     private void AddRailStartCandidate(
         List<Candidate> candidates,
         TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings,
+        LevelGenerationSettings levelSettings,
         float targetLength)
     {
-        if (state.CurrentStructureType != TrackStructureType.SolidTrack)         return;
-        if (!Mathf.Approximately(state.CurrentWidthRatio, 1f))                   return;
-        if (state.CurrentVerticalState != TrackVerticalState.Flat)               return;
-        if (state.GeneratedLength < profile.ForbidRailNearStartDistance)         return;
-        if (state.GeneratedLength > targetLength - profile.ForbidRailNearEndDistance) return;
-        if (state.DistanceSinceLastRail < profile.MinStraightAfterRail)          return;
+        if (state.CurrentStructureType != TrackStructureType.SolidTrack)
+        {
+            return;
+        }
 
-        float railChance = profile.RailGenerationChance
-            * settings.RailChanceMultiplier
-            * settings.DifficultyMultiplier;
+        if (!Mathf.Approximately(state.CurrentWidthRatio, 1f))
+        {
+            return;
+        }
 
+        if (state.CurrentVerticalState != TrackVerticalState.Flat)
+        {
+            return;
+        }
+
+        if (state.GeneratedLength < profile.ForbidRailNearStartDistance)
+        {
+            return;
+        }
+
+        if (state.GeneratedLength > targetLength - profile.ForbidRailNearEndDistance)
+        {
+            return;
+        }
+
+        if (state.DistanceSinceLastRail < profile.MinStraightAfterRail)
+        {
+            return;
+        }
+
+        float railChance = profile.RailGenerationChance * levelSettings.RailChanceMultiplier * levelSettings.DifficultyMultiplier;
         if (railChance <= 0f)
         {
             return;
@@ -400,121 +536,80 @@ public sealed class TrackRuleEvaluator
 
     #region Decision Payload
 
+    /// <summary>
+    /// Construye el payload final de una decisión seleccionada.
+    /// </summary>
     private TrackGenerationDecision BuildDecisionPayload(
         TrackFeatureType selectedFeature,
         TrackGenerationState state,
         TrackGenerationProfile profile,
-        ResolvedTrackSettings settings,
+        LevelGenerationSettings levelSettings,
         System.Random random,
         float minTrackHeight,
         float maxTrackHeight)
     {
         if (selectedFeature == TrackFeatureType.Straight)
-            return CreateStraightDecision(RandomSolidLength(profile, random), 0f, state.CurrentWidthRatio);
-
-        if (TrackFeatureUtility.IsLateralFeature(selectedFeature))
-            return CreateLateralDecision(selectedFeature, profile, state.CurrentWidthRatio);
-
-        if (selectedFeature == TrackFeatureType.SlopeUp || selectedFeature == TrackFeatureType.SlopeDown)
-            return CreateVerticalDecision(selectedFeature, state, profile, random, minTrackHeight, maxTrackHeight);
-
-        if (selectedFeature == TrackFeatureType.NarrowStart)
-            return CreateNarrowStartDecision(profile, random);
-
-        if (selectedFeature == TrackFeatureType.NarrowEnd)
-            return CreateNarrowEndDecision(profile);
-
-        if (selectedFeature == TrackFeatureType.Gap)
-            return CreateGapDecision(profile, random, state.CurrentWidthRatio);
-
-        if (selectedFeature == TrackFeatureType.RailStart)
-            return CreateRailStartDecision(profile, random, state.CurrentWidthRatio);
-
-        if (selectedFeature == TrackFeatureType.RailSegment)
-            return CreateRailSegmentDecision(profile, random, state.CurrentWidthRatio);
-
-        if (selectedFeature == TrackFeatureType.RailEnd)
-            return CreateRailEndDecision(profile, random, state.CurrentWidthRatio);
-
-        if (selectedFeature == TrackFeatureType.Finish)
-            return CreateFinishDecision(RandomSolidLength(profile, random), state.CurrentWidthRatio);
-
-        return CreateStraightDecision(RandomSolidLength(profile, random), 0f, state.CurrentWidthRatio);
-    }
-
-    #endregion
-
-    #region Helpers
-
-    private float ResolveSafeStartLength(TrackGenerationProfile profile, ResolvedTrackSettings settings)
-    {
-        return settings.SafeStartLengthOverride > 0f
-            ? settings.SafeStartLengthOverride
-            : profile.SafeStartLength;
-    }
-
-    private float ResolveSafeEndLength(TrackGenerationProfile profile, ResolvedTrackSettings settings)
-    {
-        return settings.SafeEndLengthOverride > 0f
-            ? settings.SafeEndLengthOverride
-            : profile.SafeEndLength;
-    }
-
-    private TrackFeatureType PickWeighted(List<Candidate> candidates, System.Random random)
-    {
-        float totalWeight = 0f;
-        for (int i = 0; i < candidates.Count; i++)
-            totalWeight += Mathf.Max(0.0001f, candidates[i].Weight);
-
-        double pick = random.NextDouble() * totalWeight;
-        float cumulative = 0f;
-
-        for (int i = 0; i < candidates.Count; i++)
         {
-            cumulative += Mathf.Max(0.0001f, candidates[i].Weight);
-            if (pick <= cumulative)
-                return candidates[i].FeatureType;
+            return CreateStraightDecision(
+                RandomSolidLength(profile, random),
+                0f,
+                state.CurrentWidthRatio);
         }
 
-        return candidates[candidates.Count - 1].FeatureType;
+        if (TrackFeatureUtility.IsLateralFeature(selectedFeature))
+        {
+            return CreateLateralDecision(selectedFeature, profile, state.CurrentWidthRatio);
+        }
+
+        if (selectedFeature == TrackFeatureType.SlopeUp || selectedFeature == TrackFeatureType.SlopeDown)
+        {
+            return CreateVerticalDecision(selectedFeature, state, profile, random, minTrackHeight, maxTrackHeight);
+        }
+
+        if (selectedFeature == TrackFeatureType.NarrowStart)
+        {
+            return CreateNarrowStartDecision(profile, random);
+        }
+
+        if (selectedFeature == TrackFeatureType.NarrowEnd)
+        {
+            return CreateNarrowEndDecision(profile);
+        }
+
+        if (selectedFeature == TrackFeatureType.Gap)
+        {
+            return CreateGapDecision(profile, random, state.CurrentWidthRatio);
+        }
+
+        if (selectedFeature == TrackFeatureType.RailStart)
+        {
+            return CreateRailStartDecision(profile, random, state.CurrentWidthRatio);
+        }
+
+        if (selectedFeature == TrackFeatureType.RailSegment)
+        {
+            return CreateRailSegmentDecision(profile, random, state.CurrentWidthRatio);
+        }
+
+        if (selectedFeature == TrackFeatureType.RailEnd)
+        {
+            return CreateRailEndDecision(profile, random, state.CurrentWidthRatio);
+        }
+
+        if (selectedFeature == TrackFeatureType.Finish)
+        {
+            return CreateFinishDecision(RandomSolidLength(profile, random), state.CurrentWidthRatio);
+        }
+
+        return CreateStraightDecision(
+            RandomSolidLength(profile, random),
+            0f,
+            state.CurrentWidthRatio);
     }
 
-    private float RandomSolidLength(TrackGenerationProfile profile, System.Random random)
-    {
-        return RandomRange(profile.MinimumSectionLength, profile.MaximumSectionLength, random);
-    }
-
-    private float RandomRange(float min, float max, System.Random random)
-    {
-        if (Mathf.Approximately(min, max))
-            return min;
-
-        return Mathf.Lerp(min, max, (float)random.NextDouble());
-    }
-
-    // ── Los métodos Create* no reciben settings y no cambian. ─────────────────
-    // Dejá intactos todos los métodos:
-    //   CreateStraightDecision, CreateLateralDecision, CreateVerticalDecision,
-    //   CreateNarrowStartDecision, CreateNarrowEndDecision, CreateGapDecision,
-    //   CreateRailStartDecision, CreateRailSegmentDecision, CreateRailEndDecision,
-    //   CreateFinishDecision, AddLateralCandidatesForState
-    // y cualquier otro método que no tenga LevelGenerationSettings en su firma.
-
-    private TrackGenerationDecision CreateRailEndDecision(
-        TrackGenerationProfile profile,
-        System.Random random,
-        float currentWidthRatio)
-    {
-        return new TrackGenerationDecision(
-            TrackFeatureType.RailEnd,
-            RandomRange(profile.RailSectionLengthMin, profile.RailSectionLengthMax, random),
-            profile.MinStraightAfterRail,
-            currentWidthRatio,
-            0f, 0f, 0f,
-            profile.RailSeparation,
-            profile.RailWidth);
-    }
-
+    /// <summary>
+    /// Crea una decisión de recta normal.
+    /// </summary>
     private TrackGenerationDecision CreateStraightDecision(
         float changeLength,
         float recoveryLength,
@@ -525,7 +620,306 @@ public sealed class TrackRuleEvaluator
             Mathf.Max(0f, changeLength),
             Mathf.Max(0f, recoveryLength),
             currentWidthRatio,
-            0f, 0f, 0f, 0f, 0f);
+            0f,
+            0f,
+            0f,
+            0f,
+            0f);
+    }
+
+    /// <summary>
+    /// Crea una decisión de cierre final.
+    /// </summary>
+    private TrackGenerationDecision CreateFinishDecision(
+        float changeLength,
+        float currentWidthRatio)
+    {
+        return new TrackGenerationDecision(
+            TrackFeatureType.Finish,
+            Mathf.Max(0f, changeLength),
+            0f,
+            currentWidthRatio,
+            0f,
+            0f,
+            0f,
+            0f,
+            0f);
+    }
+
+    /// <summary>
+    /// Crea una decisión lateral.
+    /// </summary>
+    private TrackGenerationDecision CreateLateralDecision(
+        TrackFeatureType featureType,
+        TrackGenerationProfile profile,
+        float currentWidthRatio)
+    {
+        float angle = Mathf.Abs(TrackFeatureUtility.GetSignedTurnAngle(featureType));
+        float radians = angle * Mathf.Deg2Rad;
+        float arcLength = profile.CurveRadius * radians;
+
+        return new TrackGenerationDecision(
+            featureType,
+            arcLength,
+            profile.MinStraightAfterLateralChange,
+            currentWidthRatio,
+            0f,
+            0f,
+            0f,
+            0f,
+            0f);
+    }
+
+/// <summary>
+/// Crea una decisión vertical con delta aleatorio dentro del rango válido,
+/// respetando el ángulo máximo configurado en el perfil.
+///
+/// El delta máximo por ángulo se calcula como:
+///   maxDelta = changeLength × tan(maxSlopeAngleDegrees)
+/// Esto limita el ángulo GLOBAL (inicio a fin de la sección).
+/// La zona media de la transición puede ser algo más empinada.
+/// </summary>
+private TrackGenerationDecision CreateVerticalDecision(
+    TrackFeatureType featureType,
+    TrackGenerationState state,
+    TrackGenerationProfile profile,
+    System.Random random,
+    float minTrackHeight,
+    float maxTrackHeight)
+{
+    float requestedDelta = RandomRange(profile.SlopeHeightStepMin, profile.SlopeHeightStepMax, random);
+    float changeLength = RandomSolidLength(profile, random);
+
+    // Calcular el delta máximo permitido por el ángulo configurado
+    float maxDeltaByAngle = changeLength * Mathf.Tan(profile.MaxSlopeAngleDegrees * Mathf.Deg2Rad);
+
+    float finalDelta;
+
+    if (featureType == TrackFeatureType.SlopeUp)
+    {
+        float allowedMax = Mathf.Max(0f, maxTrackHeight - state.CurrentHeight);
+        finalDelta = Mathf.Min(requestedDelta, allowedMax);
+        finalDelta = Mathf.Min(finalDelta, maxDeltaByAngle); // clampar por ángulo
+    }
+    else
+    {
+        float allowedMax = Mathf.Max(0f, state.CurrentHeight - minTrackHeight);
+        finalDelta = Mathf.Min(requestedDelta, allowedMax);
+        finalDelta = Mathf.Min(finalDelta, maxDeltaByAngle); // clampar por ángulo
+        finalDelta *= -1f;
+    }
+
+    return new TrackGenerationDecision(
+        featureType,
+        changeLength,
+        profile.MinStraightAfterVerticalChange,
+        state.CurrentWidthRatio,
+        finalDelta,
+        0f,
+        0f,
+        0f,
+        0f);
+}
+
+    /// <summary>
+    /// Crea una decisión de inicio de estrechamiento.
+    /// </summary>
+    private TrackGenerationDecision CreateNarrowStartDecision(
+        TrackGenerationProfile profile,
+        System.Random random)
+    {
+        float widthRatio = RandomRange(profile.NarrowWidthRatioMin, profile.NarrowWidthRatioMax, random);
+
+        return new TrackGenerationDecision(
+            TrackFeatureType.NarrowStart,
+            RandomSolidLength(profile, random),
+            profile.MinStraightAfterWidthChange,
+            widthRatio,
+            0f,
+            0f,
+            0f,
+            0f,
+            0f);
+    }
+
+    /// <summary>
+    /// Crea una decisión de fin de estrechamiento.
+    /// </summary>
+    private TrackGenerationDecision CreateNarrowEndDecision(
+        TrackGenerationProfile profile)
+    {
+        return new TrackGenerationDecision(
+            TrackFeatureType.NarrowEnd,
+            profile.NarrowTransitionLength,
+            profile.MinStraightAfterWidthChange,
+            1f,
+            0f,
+            0f,
+            0f,
+            0f,
+            0f);
+    }
+
+    /// <summary>
+    /// Crea una decisión de gap con mini rampa previa.
+    /// </summary>
+    private TrackGenerationDecision CreateGapDecision(
+        TrackGenerationProfile profile,
+        System.Random random,
+        float currentWidthRatio)
+    {
+        float gapLength = RandomRange(profile.GapLengthMin, profile.GapLengthMax, random);
+        float rampLength = RandomRange(profile.PreGapRampLengthMin, profile.PreGapRampLengthMax, random);
+        float rampHeight = RandomRange(profile.PreGapRampHeightMin, profile.PreGapRampHeightMax, random);
+
+        return new TrackGenerationDecision(
+            TrackFeatureType.Gap,
+            gapLength,
+            profile.MinStraightAfterGap,
+            currentWidthRatio,
+            0f,
+            rampLength,
+            rampHeight,
+            0f,
+            0f);
+    }
+
+    /// <summary>
+    /// Crea una decisión de entrada a rail.
+    /// </summary>
+    private TrackGenerationDecision CreateRailStartDecision(
+        TrackGenerationProfile profile,
+        System.Random random,
+        float currentWidthRatio)
+    {
+        return new TrackGenerationDecision(
+            TrackFeatureType.RailStart,
+            RandomRange(profile.RailSectionLengthMin, profile.RailSectionLengthMax, random),
+            0f,
+            currentWidthRatio,
+            0f,
+            0f,
+            0f,
+            profile.RailSeparation,
+            profile.RailWidth);
+    }
+
+    /// <summary>
+    /// Crea una decisión de continuación dentro de rail.
+    /// </summary>
+    private TrackGenerationDecision CreateRailSegmentDecision(
+        TrackGenerationProfile profile,
+        System.Random random,
+        float currentWidthRatio)
+    {
+        return new TrackGenerationDecision(
+            TrackFeatureType.RailSegment,
+            RandomRange(profile.RailSectionLengthMin, profile.RailSectionLengthMax, random),
+            0f,
+            currentWidthRatio,
+            0f,
+            0f,
+            0f,
+            profile.RailSeparation,
+            profile.RailWidth);
+    }
+
+    /// <summary>
+    /// Crea una decisión de salida de rail.
+    /// </summary>
+    private TrackGenerationDecision CreateRailEndDecision(
+        TrackGenerationProfile profile,
+        System.Random random,
+        float currentWidthRatio)
+    {
+        return new TrackGenerationDecision(
+            TrackFeatureType.RailEnd,
+            RandomRange(profile.RailSectionLengthMin, profile.RailSectionLengthMax, random),
+            profile.MinStraightAfterRail,
+            currentWidthRatio,
+            0f,
+            0f,
+            0f,
+            profile.RailSeparation,
+            profile.RailWidth);
+    }
+
+    #endregion
+
+    #region Helpers
+
+    /// <summary>
+    /// Selecciona un candidato por pesos ponderados.
+    /// </summary>
+    private TrackFeatureType PickWeighted(List<Candidate> candidates, System.Random random)
+    {
+        float totalWeight = 0f;
+
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            totalWeight += Mathf.Max(0.0001f, candidates[i].Weight);
+        }
+
+        double pick = random.NextDouble() * totalWeight;
+        float cumulative = 0f;
+
+        for (int i = 0; i < candidates.Count; i++)
+        {
+            cumulative += Mathf.Max(0.0001f, candidates[i].Weight);
+
+            if (pick <= cumulative)
+            {
+                return candidates[i].FeatureType;
+            }
+        }
+
+        return candidates[candidates.Count - 1].FeatureType;
+    }
+
+    /// <summary>
+    /// Devuelve una longitud aleatoria de pista sólida.
+    /// </summary>
+    private float RandomSolidLength(TrackGenerationProfile profile, System.Random random)
+    {
+        return RandomRange(profile.MinimumSectionLength, profile.MaximumSectionLength, random);
+    }
+
+    /// <summary>
+    /// Devuelve un valor aleatorio dentro del rango indicado.
+    /// </summary>
+    private float RandomRange(float min, float max, System.Random random)
+    {
+        if (Mathf.Approximately(min, max))
+        {
+            return min;
+        }
+
+        double t = random.NextDouble();
+        return Mathf.Lerp(min, max, (float)t);
+    }
+
+    /// <summary>
+    /// Resuelve la longitud segura inicial efectiva.
+    /// </summary>
+    private float ResolveSafeStartLength(
+        TrackGenerationProfile profile,
+        LevelGenerationSettings levelSettings)
+    {
+        return levelSettings.SafeStartLengthOverride > 0f
+            ? levelSettings.SafeStartLengthOverride
+            : profile.SafeStartLength;
+    }
+
+    /// <summary>
+    /// Resuelve la longitud segura final efectiva.
+    /// </summary>
+    private float ResolveSafeEndLength(
+        TrackGenerationProfile profile,
+        LevelGenerationSettings levelSettings)
+    {
+        return levelSettings.SafeEndLengthOverride > 0f
+            ? levelSettings.SafeEndLengthOverride
+            : profile.SafeEndLength;
     }
 
     #endregion
