@@ -7,6 +7,8 @@ using UnityEngine;
 /// - Definir los rangos progresivos de probabilidades de spawn por categoría.
 /// - Controlar a partir de qué nivel se habilita cada categoría de obstáculo.
 /// - Definir la progresión de monedas por nivel.
+///
+/// Este SO reemplaza la necesidad de crear un LevelContentGenerationSettings por cada nivel.
 /// </summary>
 [CreateAssetMenu(fileName = "ContentDifficultyProgressionProfile",
     menuName = "Game/Progression/Content Difficulty Progression Profile")]
@@ -65,43 +67,43 @@ public sealed class ContentDifficultyProgressionProfile : ScriptableObject
     [Tooltip("Cantidad máxima de monedas a generar por nivel.")]
     [SerializeField] private DifficultyParameterRange maxCoinCount = DifficultyParameterRange.Linear(6f, 18f, 25);
 
-    [Tooltip("Si está activo, la cantidad de monedas es aleatoria dentro del rango.")]
+    [Tooltip("Si está activo, la cantidad de monedas es aleatoria dentro del rango evaluado.")]
     [SerializeField] private bool useRandomCoinCount = true;
 
     #endregion
 
     #region Properties
 
-    public DifficultyParameterRange BoxSpawnChance => boxSpawnChance;
-    public DifficultyParameterRange WallSpawnChance => wallSpawnChance;
-    public DifficultyParameterRange BallFlatSpawnChance => ballFlatSpawnChance;
-    public DifficultyParameterRange BallNarrowSpawnChance => ballNarrowSpawnChance;
-    public DifficultyParameterRange BallRailSpawnChance => ballRailSpawnChance;
+    public DifficultyParameterRange BoxSpawnChance         => boxSpawnChance;
+    public DifficultyParameterRange WallSpawnChance        => wallSpawnChance;
+    public DifficultyParameterRange BallFlatSpawnChance    => ballFlatSpawnChance;
+    public DifficultyParameterRange BallNarrowSpawnChance  => ballNarrowSpawnChance;
+    public DifficultyParameterRange BallRailSpawnChance    => ballRailSpawnChance;
     public DifficultyParameterRange BallBeforeDownSlopeChance => ballBeforeDownSlopeChance;
-    public DifficultyParameterRange FanFlatSpawnChance => fanFlatSpawnChance;
+    public DifficultyParameterRange FanFlatSpawnChance     => fanFlatSpawnChance;
     public DifficultyParameterRange FanStraightRailSpawnChance => fanStraightRailSpawnChance;
-    public DifficultyParameterRange MinCoinCount => minCoinCount;
-    public DifficultyParameterRange MaxCoinCount => maxCoinCount;
-    public bool UseRandomCoinCount => useRandomCoinCount;
+    public DifficultyParameterRange MinCoinCount           => minCoinCount;
+    public DifficultyParameterRange MaxCoinCount           => maxCoinCount;
+    public bool UseRandomCoinCount                         => useRandomCoinCount;
 
     #endregion
 
     #region Unlock API
 
     /// <summary>Indica si las cajas están desbloqueadas para el nivel dado.</summary>
-    public bool IsBoxesUnlocked(int levelIndex) => levelIndex >= boxesUnlockLevel;
+    public bool IsBoxesUnlocked(int levelIndex)  => levelIndex >= boxesUnlockLevel;
 
     /// <summary>Indica si los muros están desbloqueados para el nivel dado.</summary>
-    public bool IsWallsUnlocked(int levelIndex) => levelIndex >= wallsUnlockLevel;
+    public bool IsWallsUnlocked(int levelIndex)  => levelIndex >= wallsUnlockLevel;
 
     /// <summary>Indica si las pelotas empujables están desbloqueadas para el nivel dado.</summary>
-    public bool IsBallsUnlocked(int levelIndex) => levelIndex >= ballsUnlockLevel;
+    public bool IsBallsUnlocked(int levelIndex)  => levelIndex >= ballsUnlockLevel;
 
     /// <summary>Indica si los ventiladores están desbloqueados para el nivel dado.</summary>
-    public bool IsFansUnlocked(int levelIndex) => levelIndex >= fansUnlockLevel;
+    public bool IsFansUnlocked(int levelIndex)   => levelIndex >= fansUnlockLevel;
 
     /// <summary>Indica si las monedas están desbloqueadas para el nivel dado.</summary>
-    public bool IsCoinsUnlocked(int levelIndex) => levelIndex >= coinsUnlockLevel;
+    public bool IsCoinsUnlocked(int levelIndex)  => levelIndex >= coinsUnlockLevel;
 
     #endregion
 }
