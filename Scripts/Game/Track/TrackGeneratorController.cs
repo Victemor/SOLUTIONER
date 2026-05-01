@@ -3,6 +3,11 @@ using UnityEngine;
 
 /// <summary>
 /// Controlador principal del generador procedural de track.
+///
+/// En modo de progresión infinita, la generación es iniciada exclusivamente por
+/// <see cref="InfiniteLevelManager"/>, que inyecta los <see cref="LevelGenerationSettings"/>
+/// ya configurados a través de <see cref="GenerateLevel(LevelGenerationSettings)"/>.
+/// Los settings no se asignan en el Inspector de este componente.
 /// </summary>
 public sealed class TrackGeneratorController : MonoBehaviour
 {
@@ -10,12 +15,8 @@ public sealed class TrackGeneratorController : MonoBehaviour
 
     [Header("Configuration")]
     [SerializeField]
-    [Tooltip("Perfil base de generación del track.")]
+    [Tooltip("Perfil base de generación del track. Define los valores máximos de todas las probabilidades.")]
     private TrackGenerationProfile generationProfile;
-
-    [SerializeField]
-    [Tooltip("Configuración específica del nivel actual.")]
-    private LevelGenerationSettings levelGenerationSettings;
 
     [Header("Generated Root")]
     [SerializeField]
@@ -58,7 +59,8 @@ public sealed class TrackGeneratorController : MonoBehaviour
 
     [Header("Debug")]
     [SerializeField]
-    [Tooltip("Si está activo, genera automáticamente al cargar la escena.")]
+    [Tooltip("Si está activo, genera automáticamente al cargar la escena. " +
+             "InfiniteLevelManager lo desactiva en su Awake.")]
     private bool generateOnStart = true;
 
     [SerializeField]
@@ -76,6 +78,19 @@ public sealed class TrackGeneratorController : MonoBehaviour
     private readonly TrackRuleEvaluator ruleEvaluator = new TrackRuleEvaluator();
     private TrackRuntimeMap generatedMap;
 
+    /// <summary>
+    /// Settings de nivel activos en la generación actual.
+    /// Inyectados por <see cref="InfiniteLevelManager"/> vía <see cref="GenerateLevel(LevelGenerationSettings)"/>.
+    /// </summary>
+    private LevelGenerationSettings activeSettings;
+
+    /// <summary>
+    /// Profile visual temporal para sobreescribir solo materiales (ej: nivel bonus).
+    /// Si es null, se usa <see cref="generationProfile"/> para todo.
+    /// </summary>
+    private TrackGenerationProfile activeVisualProfile;
+    
+
     #endregion
 
     #region Properties
@@ -85,25 +100,94 @@ public sealed class TrackGeneratorController : MonoBehaviour
     /// </summary>
     public TrackRuntimeMap GeneratedMap => generatedMap;
 
+    public TrackGenerationProfile GenerationProfile => generationProfile;
+    
+    /// <summary>
+    /// Generador de barreras. InfiniteLevelManager lo usa para inyectar
+    /// la probabilidad de barreras antes de cada generación.
+    /// </summary>
+    public TrackBarrierGenerator BarrierGenerator => trackBarrierGenerator;
+    
+
     #endregion
+
+    #region Unity Lifecycle
 
     private void Awake()
     {
         if (generateOnStart)
         {
-            GenerateLevel();
+            Debug.LogWarning(
+                "[TRACK] generateOnStart está activo pero no hay settings inyectados. " +
+                "Asigna un InfiniteLevelManager en la escena o desactiva generateOnStart.",
+                this);
         }
     }
 
+    #endregion
+
+    #region Public API
+
     /// <summary>
-    /// Genera el nivel procedural completo y reconstruye su representación visual.
+    /// Desactiva la generación automática al inicio de escena.
+    /// <see cref="InfiniteLevelManager"/> lo llama en su Awake para tomar control del ciclo.
+    /// </summary>
+    public void DisableAutoGeneration()
+    {
+        generateOnStart = false;
+    }
+
+    /// <summary>
+    /// Inyecta los settings del nivel actual y genera el track procedural completo.
+    /// Punto de entrada principal desde <see cref="InfiniteLevelManager"/>.
+    /// </summary>
+    /// <param name="settings">Settings configurados para el nivel actual.</param>
+    public void GenerateLevel(LevelGenerationSettings settings)
+    {
+        if (settings == null)
+        {
+            Debug.LogWarning("[TRACK] Se llamó GenerateLevel sin settings. Generación cancelada.", this);
+            return;
+        }
+
+        activeSettings = settings;
+        GenerateLevel();
+    }
+
+    /// <summary>
+    /// Sobreescribe temporalmente el profile de materiales visuales para la próxima generación.
+    /// Usado para niveles bonus que necesitan texturas de suelo distintas.
+    /// </summary>
+    public void SetVisualProfileOverride(TrackGenerationProfile profile)
+    {
+        activeVisualProfile = profile;
+    }
+    
+    /// <summary>
+    /// Elimina el override de profile visual, volviendo al profile base del Inspector.
+    /// </summary>
+    public void ClearVisualProfileOverride()
+    {
+        activeVisualProfile = null;
+    }
+
+    /// <summary>
+    /// Genera el nivel usando los settings activos actuales.
+    /// Requiere que <see cref="GenerateLevel(LevelGenerationSettings)"/> haya sido llamado
+    /// al menos una vez para inyectar los settings.
     /// </summary>
     [ContextMenu("Generate Level")]
     public void GenerateLevel()
     {
-        if (generationProfile == null || levelGenerationSettings == null)
+        if (generationProfile == null)
         {
-            Debug.LogWarning("[TRACK] Missing generation profile or level settings.", this);
+            Debug.LogWarning("[TRACK] generationProfile no asignado.", this);
+            return;
+        }
+
+        if (activeSettings == null)
+        {
+            Debug.LogWarning("[TRACK] No hay settings activos. Llama GenerateLevel(LevelGenerationSettings) primero.", this);
             return;
         }
 
@@ -111,16 +195,17 @@ public sealed class TrackGeneratorController : MonoBehaviour
         LogConfigurationWarnings();
         ClearGeneratedVisuals();
 
-        int resolvedSeed = ResolveSeed(levelGenerationSettings);
+        int resolvedSeed = ResolveSeed(activeSettings);
         System.Random random = new System.Random(resolvedSeed);
 
-        float targetLength = generationProfile.TargetTrackLength * levelGenerationSettings.LengthMultiplier;
-        float minTrackHeight = levelGenerationSettings.OverrideMinHeight
-            ? levelGenerationSettings.MinHeightOverride
+        float targetLength = generationProfile.TargetTrackLength * activeSettings.LengthMultiplier;
+
+        float minTrackHeight = activeSettings.OverrideMinHeight
+            ? activeSettings.MinHeightOverride
             : generationProfile.MinTrackHeight;
 
-        float maxTrackHeight = levelGenerationSettings.OverrideMaxHeight
-            ? levelGenerationSettings.MaxHeightOverride
+        float maxTrackHeight = activeSettings.OverrideMaxHeight
+            ? activeSettings.MaxHeightOverride
             : generationProfile.MaxTrackHeight;
 
         List<TrackSectionDefinition> sections = new List<TrackSectionDefinition>();
@@ -128,14 +213,14 @@ public sealed class TrackGeneratorController : MonoBehaviour
 
         TrackGenerationState state = CreateInitialState();
 
-        GenerateSafeStart(ref state, sections, features, generationProfile, levelGenerationSettings);
+        GenerateSafeStart(ref state, sections, features, generationProfile, activeSettings);
 
         while (state.GeneratedLength < targetLength - ResolveSafeEndLength())
         {
             TrackGenerationDecision decision = ruleEvaluator.EvaluateNextDecision(
                 ref state,
                 generationProfile,
-                levelGenerationSettings,
+                activeSettings,
                 random,
                 targetLength,
                 minTrackHeight,
@@ -171,7 +256,7 @@ public sealed class TrackGeneratorController : MonoBehaviour
 
         if (trackBarrierGenerator != null)
         {
-            trackBarrierGenerator.Rebuild(generatedMap);
+            trackBarrierGenerator.Rebuild(generatedMap, activeSettings);
         }
 
         if (voidZoneGenerator != null)
@@ -183,7 +268,8 @@ public sealed class TrackGeneratorController : MonoBehaviour
         {
             Debug.Log(
                 $"[TRACK] Generated level with seed {resolvedSeed}. " +
-                $"Sections: {sections.Count}. Features: {features.Count}. Chunks: {surfaceChunks.Count}. SplinePoints: {splinePoints.Count}",
+                $"Sections: {sections.Count}. Features: {features.Count}. " +
+                $"Chunks: {surfaceChunks.Count}. SplinePoints: {splinePoints.Count}",
                 this);
         }
     }
@@ -197,6 +283,8 @@ public sealed class TrackGeneratorController : MonoBehaviour
         ClearGeneratedVisuals();
         generatedMap = null;
     }
+
+    #endregion
 
     #region Generation Core
 
@@ -653,13 +741,13 @@ public sealed class TrackGeneratorController : MonoBehaviour
             LateralStateAfter = state.CurrentLateralState,
             VerticalStateBefore = state.CurrentVerticalState,
             VerticalStateAfter = endVerticalState,
-            HasSurface = structureType != TrackStructureType.Gap,
+            HasSurface = true,
             TurnAngleDegrees = 0f,
             TurnRadius = 0f,
             SlopeHeightDelta = verticalDelta,
             RampHeightDelta = 0f,
-            RailSeparation = structureType == TrackStructureType.RailTrack ? generationProfile.RailSeparation : 0f,
-            RailWidth = structureType == TrackStructureType.RailTrack ? generationProfile.RailWidth : 0f,
+            RailSeparation = 0f,
+            RailWidth = 0f,
             StartsFromCutCenter = false,
             EndsAtCutCenter = false
         };
@@ -667,15 +755,15 @@ public sealed class TrackGeneratorController : MonoBehaviour
         sections.Add(section);
         AddFeatureRecord(section, features);
 
-        state.CurrentVerticalState = endVerticalState;
-        state.CurrentPosition = endPosition;
         state.CurrentHeight = endHeight;
+        state.CurrentPosition = endPosition;
         state.GeneratedLength += length;
         state.DistanceSinceLastLateralChange += length;
         state.DistanceSinceLastVerticalChange = 0f;
         state.DistanceSinceLastWidthChange += length;
         state.DistanceSinceLastGap += length;
         state.DistanceSinceLastRail += length;
+        state.CurrentVerticalState = endVerticalState;
         state.CurrentStructureType = structureType;
     }
 
@@ -812,66 +900,16 @@ public sealed class TrackGeneratorController : MonoBehaviour
         List<TrackSectionDefinition> sections,
         List<TrackFeatureRecord> features)
     {
-        rampLength = Mathf.Max(0f, rampLength);
-        if (rampLength <= 0.0001f)
+        if (rampLength <= 0f || Mathf.Abs(rampHeight) <= 0.001f)
         {
             return;
         }
 
-        Vector3 startPosition = state.CurrentPosition;
-        Vector3 endPosition = startPosition + (state.CurrentForward * rampLength);
-        endPosition.y = state.CurrentHeight + rampHeight;
-
-        float width = ResolveWidthFromRatio(state.CurrentWidthRatio);
-
-        TrackSectionDefinition section = new TrackSectionDefinition
-        {
-            FeatureType = TrackFeatureType.PreGapRamp,
-            StructureType = TrackStructureType.SolidTrack,
-            StartDistance = state.GeneratedLength,
-            EndDistance = state.GeneratedLength + rampLength,
-            Length = rampLength,
-            StartPosition = startPosition,
-            EndPosition = endPosition,
-            StartForward = state.CurrentForward,
-            EndForward = state.CurrentForward,
-            StartHeight = state.CurrentHeight,
-            EndHeight = state.CurrentHeight + rampHeight,
-            StartWidth = width,
-            EndWidth = width,
-            TargetWidthRatio = state.CurrentWidthRatio,
-            LateralStateBefore = state.CurrentLateralState,
-            LateralStateAfter = state.CurrentLateralState,
-            VerticalStateBefore = state.CurrentVerticalState,
-            VerticalStateAfter = TrackVerticalState.Ascending,
-            HasSurface = true,
-            TurnAngleDegrees = 0f,
-            TurnRadius = 0f,
-            SlopeHeightDelta = 0f,
-            RampHeightDelta = rampHeight,
-            RailSeparation = 0f,
-            RailWidth = 0f,
-            StartsFromCutCenter = false,
-            EndsAtCutCenter = true
-        };
-
-        sections.Add(section);
-        AddFeatureRecord(section, features);
-
-        state.CurrentPosition = endPosition;
-        state.CurrentHeight += rampHeight;
-        state.GeneratedLength += rampLength;
-        state.DistanceSinceLastLateralChange += rampLength;
-        state.DistanceSinceLastVerticalChange += rampLength;
-        state.DistanceSinceLastWidthChange += rampLength;
-        state.DistanceSinceLastGap += rampLength;
-        state.DistanceSinceLastRail += rampLength;
-        state.CurrentVerticalState = TrackVerticalState.Flat;
-        state.CurrentStructureType = TrackStructureType.SolidTrack;
+        AddVerticalSection(ref state, rampLength, TrackFeatureType.SlopeUp, rampHeight, sections, features);
     }
 
     /// <summary>
-    /// Agrega un gap.
+    /// Agrega un hueco (gap) en la pista.
     /// </summary>
     private void AddGapSection(
         ref TrackGenerationState state,
@@ -1133,12 +1171,10 @@ public sealed class TrackGeneratorController : MonoBehaviour
     /// <summary>
     /// Crea el GameObject asociado a un chunk.
     /// </summary>
-    private void CreateChunkObject(
-        TrackSurfaceChunkDefinition chunk,
-        Transform parent)
+    private void CreateChunkObject(TrackSurfaceChunkDefinition chunk, Transform parent)
     {
         TrackMeshBuilder.TrackMeshBuildResult result =
-            TrackMeshBuilder.BuildChunkMesh(chunk, generationProfile);
+            TrackMeshBuilder.BuildChunkMesh(chunk, activeVisualProfile ?? generationProfile);
 
         GameObject chunkObject = new GameObject($"{chunkObjectNamePrefix}{chunk.ChunkIndex:D2}");
         AssignGeneratedLayer(chunkObject);
@@ -1162,10 +1198,7 @@ public sealed class TrackGeneratorController : MonoBehaviour
     /// <summary>
     /// Crea la física del chunk según su estructura.
     /// </summary>
-    private void CreateChunkPhysics(
-        TrackSurfaceChunkDefinition chunk,
-        GameObject chunkObject,
-        Mesh mesh)
+    private void CreateChunkPhysics(TrackSurfaceChunkDefinition chunk, GameObject chunkObject, Mesh mesh)
     {
         if (chunk.StructureType == TrackStructureType.RailTrack && usePrimitiveRailColliders)
         {
@@ -1185,9 +1218,7 @@ public sealed class TrackGeneratorController : MonoBehaviour
     /// <summary>
     /// Crea colliders primitivos para los dos rieles del chunk.
     /// </summary>
-    private void CreateRailPrimitiveColliders(
-        TrackSurfaceChunkDefinition chunk,
-        Transform parent)
+    private void CreateRailPrimitiveColliders(TrackSurfaceChunkDefinition chunk, Transform parent)
     {
         if (chunk == null || chunk.Samples == null || chunk.Samples.Count < 2 || parent == null)
         {
@@ -1212,21 +1243,11 @@ public sealed class TrackGeneratorController : MonoBehaviour
             TrackLayoutSamplePoint startSample = chunk.Samples[i];
             TrackLayoutSamplePoint endSample = chunk.Samples[i + 1];
 
-            ResolveRailColliderFrame(
-                startSample,
-                sideSign,
-                chunk.StartDistance,
-                chunk.EndDistance,
-                out Vector3 startCenter,
-                out float startRadius);
+            ResolveRailColliderFrame(startSample, sideSign, chunk.StartDistance, chunk.EndDistance,
+                out Vector3 startCenter, out float startRadius);
 
-            ResolveRailColliderFrame(
-                endSample,
-                sideSign,
-                chunk.StartDistance,
-                chunk.EndDistance,
-                out Vector3 endCenter,
-                out float endRadius);
+            ResolveRailColliderFrame(endSample, sideSign, chunk.StartDistance, chunk.EndDistance,
+                out Vector3 endCenter, out float endRadius);
 
             Vector3 segment = endCenter - startCenter;
             float segmentLength = segment.magnitude;
@@ -1251,6 +1272,48 @@ public sealed class TrackGeneratorController : MonoBehaviour
     }
 
     /// <summary>
+    /// Resuelve el centro y radio para un frame de collider de rail.
+    /// </summary>
+    private static void ResolveRailColliderFrame(
+        TrackLayoutSamplePoint sample,
+        float sideSign,
+        float chunkStart,
+        float chunkEnd,
+        out Vector3 center,
+        out float radius)
+    {
+        float separation = Mathf.Max(0f, sample.RailSeparation);
+        float railWidth = Mathf.Max(0.01f, sample.RailWidth);
+
+        Vector3 right = ResolveSafeRight(sample.Right, sample.Forward);
+        center = sample.Position + right * (separation * 0.5f * sideSign);
+        radius = railWidth * 0.5f;
+    }
+
+    /// <summary>
+    /// Resuelve un right seguro para el frame del rail.
+    /// </summary>
+    private static Vector3 ResolveSafeRight(Vector3 right, Vector3 forward)
+    {
+        if (right.sqrMagnitude >= 0.0001f)
+        {
+            return right.normalized;
+        }
+
+        Vector3 horizontalForward = new Vector3(forward.x, 0f, forward.z);
+
+        if (horizontalForward.sqrMagnitude < 0.0001f)
+        {
+            return Vector3.right;
+        }
+
+        horizontalForward.Normalize();
+        Vector3 resolvedRight = Vector3.Cross(Vector3.up, horizontalForward);
+
+        return resolvedRight.sqrMagnitude < 0.0001f ? Vector3.right : resolvedRight.normalized;
+    }
+
+    /// <summary>
     /// Crea una cápsula física alineada entre dos centros de rail.
     /// </summary>
     private void CreateRailCapsuleCollider(
@@ -1261,82 +1324,29 @@ public sealed class TrackGeneratorController : MonoBehaviour
         float segmentLength,
         string objectName)
     {
-        GameObject colliderObject = new GameObject(objectName);
-        AssignGeneratedLayer(colliderObject);
+        Vector3 direction = (endCenter - startCenter).normalized;
+        Vector3 midPoint = (startCenter + endCenter) * 0.5f;
 
-        Vector3 segment = endCenter - startCenter;
-        Vector3 direction = segment.normalized;
-        Vector3 center = (startCenter + endCenter) * 0.5f;
+        GameObject capsuleObject = new GameObject(objectName);
+        AssignGeneratedLayer(capsuleObject);
+        capsuleObject.transform.SetParent(parent);
+        capsuleObject.transform.position = midPoint;
+        capsuleObject.transform.rotation = ResolveCapsuleRotation(direction);
+        capsuleObject.transform.localScale = Vector3.one;
 
-        colliderObject.transform.position = center;
-        colliderObject.transform.rotation = ResolveCapsuleRotation(direction);
-        colliderObject.transform.SetParent(parent, true);
+        CapsuleCollider capsule = capsuleObject.AddComponent<CapsuleCollider>();
+        capsule.radius = radius;
+        capsule.height = segmentLength + radius * 2f;
+        capsule.direction = 2; // Z axis
 
-        CapsuleCollider capsuleCollider = colliderObject.AddComponent<CapsuleCollider>();
-        capsuleCollider.direction = 2;
-        capsuleCollider.radius = radius;
-        capsuleCollider.height = segmentLength + (radius * 2f);
-        capsuleCollider.sharedMaterial = railPhysicMaterial;
-    }
-
-    /// <summary>
-    /// Resuelve el centro y radio físico de un rail para un sample sin deformar los extremos.
-    /// </summary>
-    private void ResolveRailColliderFrame(
-        TrackLayoutSamplePoint sample,
-        float sideSign,
-        float chunkStartDistance,
-        float chunkEndDistance,
-        out Vector3 center,
-        out float radius)
-    {
-        Vector3 forward = sample.Forward.sqrMagnitude >= 0.0001f
-            ? sample.Forward.normalized
-            : Vector3.forward;
-
-        Vector3 right = sample.Right.sqrMagnitude >= 0.0001f
-            ? sample.Right.normalized
-            : Vector3.right;
-
-        if (Vector3.Dot(Vector3.Cross(forward, right), Vector3.up) < 0f)
+        if (railPhysicMaterial != null)
         {
-            right = -right;
+            capsule.sharedMaterial = railPhysicMaterial;
         }
-
-        float lateralOffset = sample.RailSeparation * 0.5f * sideSign;
-        float verticalOffset = ResolveRailVerticalOffset(
-            sample.Distance,
-            chunkStartDistance,
-            chunkEndDistance);
-
-        center = sample.Position + (right * lateralOffset) + (Vector3.up * verticalOffset);
-        radius = Mathf.Max(0.01f, sample.RailWidth * 0.5f);
     }
 
     /// <summary>
-    /// Resuelve el offset vertical de los rieles sin cerrar ni suavizar sus extremos.
-    /// </summary>
-    private float ResolveRailVerticalOffset(
-        float sampleDistance,
-        float chunkStartDistance,
-        float chunkEndDistance)
-    {
-        if (generationProfile == null)
-        {
-            return 0f;
-        }
-
-        float totalLength = Mathf.Max(0.001f, chunkEndDistance - chunkStartDistance);
-        float t = Mathf.Clamp01((sampleDistance - chunkStartDistance) / totalLength);
-
-        return Mathf.Lerp(
-            generationProfile.RailEntryVerticalOffset,
-            generationProfile.RailExitVerticalOffset,
-            t);
-    }
-
-    /// <summary>
-    /// Resuelve una rotación segura para una cápsula orientada en su eje local Z.
+    /// Resuelve la rotación de una cápsula a partir de su dirección.
     /// </summary>
     private static Quaternion ResolveCapsuleRotation(Vector3 direction)
     {
@@ -1379,6 +1389,7 @@ public sealed class TrackGeneratorController : MonoBehaviour
     private void ClearGeneratedVisuals()
     {
         Transform existingRoot = transform.Find(generatedRootName);
+
         if (existingRoot == null)
         {
             return;
@@ -1415,9 +1426,7 @@ public sealed class TrackGeneratorController : MonoBehaviour
     /// <summary>
     /// Añade un registro de feature a partir de una sección.
     /// </summary>
-    private void AddFeatureRecord(
-        TrackSectionDefinition section,
-        List<TrackFeatureRecord> features)
+    private void AddFeatureRecord(TrackSectionDefinition section, List<TrackFeatureRecord> features)
     {
         features.Add(new TrackFeatureRecord
         {
@@ -1471,9 +1480,9 @@ public sealed class TrackGeneratorController : MonoBehaviour
     }
 
     /// <summary>
-    /// Resuelve la semilla final del nivel.
+    /// Resuelve la semilla final del nivel a partir de los settings activos.
     /// </summary>
-    private int ResolveSeed(LevelGenerationSettings settings)
+    private static int ResolveSeed(LevelGenerationSettings settings)
     {
         if (settings.UseFixedSeed)
         {
@@ -1488,9 +1497,9 @@ public sealed class TrackGeneratorController : MonoBehaviour
     /// </summary>
     private float ResolveSafeEndLength()
     {
-        if (levelGenerationSettings.SafeEndLengthOverride > 0f)
+        if (activeSettings.SafeEndLengthOverride > 0f)
         {
-            return levelGenerationSettings.SafeEndLengthOverride;
+            return activeSettings.SafeEndLengthOverride;
         }
 
         return generationProfile.SafeEndLength;
@@ -1521,7 +1530,7 @@ public sealed class TrackGeneratorController : MonoBehaviour
     }
 
     /// <summary>
-    /// Valida y normaliza datos de inspector básicos.
+    /// Valida y normaliza datos de Inspector básicos.
     /// </summary>
     private void ValidateInspectorData()
     {
@@ -1542,7 +1551,7 @@ public sealed class TrackGeneratorController : MonoBehaviour
     }
 
     /// <summary>
-    /// Imprime warnings de configuración del perfil y settings.
+    /// Imprime warnings de configuración del perfil y settings activos.
     /// </summary>
     private void LogConfigurationWarnings()
     {
@@ -1552,7 +1561,7 @@ public sealed class TrackGeneratorController : MonoBehaviour
 
         TrackGenerationValidationUtility.LogWarnings(
             this,
-            TrackGenerationValidationUtility.CollectLevelSettingsWarnings(levelGenerationSettings));
+            TrackGenerationValidationUtility.CollectLevelSettingsWarnings(activeSettings));
     }
 
     /// <summary>
@@ -1584,9 +1593,7 @@ public sealed class TrackGeneratorController : MonoBehaviour
             return TrackLateralState.Center;
         }
 
-        return yawOffset < 0f
-            ? TrackLateralState.Left
-            : TrackLateralState.Right;
+        return yawOffset < 0f ? TrackLateralState.Left : TrackLateralState.Right;
     }
 
     #endregion

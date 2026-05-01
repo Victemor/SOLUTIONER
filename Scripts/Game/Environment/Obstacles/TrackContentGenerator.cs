@@ -3,6 +3,10 @@ using UnityEngine;
 
 /// <summary>
 /// Generador procedural de obstáculos, monedas y meta sobre el track.
+///
+/// En modo de progresión infinita, los settings de contenido se inyectan desde
+/// <see cref="InfiniteLevelManager"/> mediante <see cref="GenerateContent(LevelContentGenerationSettings)"/>.
+/// No existe ninguna referencia a LevelContentGenerationSettings en el Inspector de este componente.
 /// </summary>
 public sealed class TrackContentGenerator : MonoBehaviour
 {
@@ -12,11 +16,8 @@ public sealed class TrackContentGenerator : MonoBehaviour
     [Tooltip("Generador principal del track.")]
     [SerializeField] private TrackGeneratorController trackGenerator;
 
-    [Tooltip("Catálogo global de prefabs y valores base.")]
+    [Tooltip("Catálogo global de prefabs y valores base. Sus valores Base son el máximo de dificultad.")]
     [SerializeField] private TrackContentGenerationProfile contentProfile;
-
-    [Tooltip("Configuración específica del nivel. Si está vacío, se usan los valores base del catálogo global.")]
-    [SerializeField] private LevelContentGenerationSettings levelSettings;
 
     [Header("Output")]
     [Tooltip("Nombre del objeto raíz donde se instanciará todo el contenido generado.")]
@@ -25,7 +26,8 @@ public sealed class TrackContentGenerator : MonoBehaviour
     [Tooltip("Nombre del objeto hijo donde se guardarán los objetos inactivos del pool local.")]
     [SerializeField] private string poolRootName = "_Pool";
 
-    [Tooltip("Si está activo, genera contenido automáticamente al iniciar la escena.")]
+    [Tooltip("Si está activo, genera contenido automáticamente al iniciar la escena. " +
+             "InfiniteLevelManager lo desactiva en su Awake.")]
     [SerializeField] private bool generateOnStart = true;
 
     [Header("Debug")]
@@ -43,7 +45,15 @@ public sealed class TrackContentGenerator : MonoBehaviour
     private Transform poolRoot;
     private GoalSpawnData resolvedGoalData;
 
+    /// <summary>
+    /// Settings de contenido activos en la generación actual.
+    /// Inyectados por <see cref="InfiniteLevelManager"/> vía <see cref="GenerateContent(LevelContentGenerationSettings)"/>.
+    /// </summary>
+    private LevelContentGenerationSettings levelSettings;
+
     #endregion
+
+    #region Unity Lifecycle
 
     private void Start()
     {
@@ -53,8 +63,32 @@ public sealed class TrackContentGenerator : MonoBehaviour
         }
     }
 
+    #endregion
+
+    #region Public API
+
     /// <summary>
-    /// Genera todo el contenido procedural sobre el track actual.
+    /// Desactiva la generación automática de contenido al inicio de escena.
+    /// <see cref="InfiniteLevelManager"/> lo llama en su Awake para tomar control del ciclo.
+    /// </summary>
+    public void DisableAutoGeneration()
+    {
+        generateOnStart = false;
+    }
+
+    /// <summary>
+    /// Inyecta los settings de contenido del nivel actual y genera todo el contenido procedural.
+    /// Punto de entrada principal desde <see cref="InfiniteLevelManager"/>.
+    /// </summary>
+    /// <param name="settings">Settings de contenido configurados para el nivel actual.</param>
+    public void GenerateContent(LevelContentGenerationSettings settings)
+    {
+        levelSettings = settings;
+        GenerateContent();
+    }
+
+    /// <summary>
+    /// Genera todo el contenido procedural sobre el track actual usando los settings activos.
     /// </summary>
     [ContextMenu("Generate Track Content")]
     public void GenerateContent()
@@ -95,6 +129,10 @@ public sealed class TrackContentGenerator : MonoBehaviour
         objectPool.DespawnAllActive();
     }
 
+    #endregion
+
+    #region Setup
+
     private void EnsureRootsAndPool()
     {
         generatedRoot = GetOrCreateChild(transform, generatedRootName);
@@ -124,12 +162,25 @@ public sealed class TrackContentGenerator : MonoBehaviour
         return child.transform;
     }
 
+    #endregion
+
+    #region Obstacle Generation
+
     private void GenerateObstacles(TrackRuntimeMap map, Transform root, System.Random random)
     {
         IReadOnlyList<TrackSectionDefinition> sections = map.Sections;
 
+        // Límite de obstáculos configurado para este nivel. 0 = sin límite.
+        int obstacleLimit = levelSettings != null ? levelSettings.MaxObstacleCount : 0;
+        int obstacleCount = 0;
+
         for (int i = 0; i < sections.Count; i++)
         {
+            if (obstacleLimit > 0 && obstacleCount >= obstacleLimit)
+            {
+                break;
+            }
+
             TrackSectionDefinition section = sections[i];
 
             if (!section.HasSurface || section.StructureType == TrackStructureType.Gap)
@@ -147,12 +198,22 @@ public sealed class TrackContentGenerator : MonoBehaviour
 
             for (float distance = start; distance <= end; distance += contentProfile.ObstacleEvaluationStep)
             {
-                TryGenerateSectionContent(map, sections, i, section, distance, root, random);
+                if (obstacleLimit > 0 && obstacleCount >= obstacleLimit)
+                {
+                    break;
+                }
+
+                bool spawned = TryGenerateSectionContent(map, sections, i, section, distance, root, random);
+
+                if (spawned)
+                {
+                    obstacleCount++;
+                }
             }
         }
     }
 
-    private void TryGenerateSectionContent(
+    private bool TryGenerateSectionContent(
         TrackRuntimeMap map,
         IReadOnlyList<TrackSectionDefinition> sections,
         int sectionIndex,
@@ -163,68 +224,84 @@ public sealed class TrackContentGenerator : MonoBehaviour
     {
         if (IsFlatSolid(section))
         {
-            if (IsEnabled(Category.Walls) && TryRoll(random, GetWallChance()))
+            if (IsEnabled(Category.Walls)
+                && HasPrefabsFor(Category.Walls)
+                && TryRoll(random, GetWallChance()))
             {
-                TrySpawnCentered(map, distance, GetEntries(Category.Walls), GetOverrides(Category.Walls), root, random, TrackSpawnPriority.High);
-                return;
+                return TrySpawnCentered(map, distance, GetEntries(Category.Walls), GetOverrides(Category.Walls), root, random, TrackSpawnPriority.High);
             }
 
-            if (IsEnabled(Category.Boxes) && TryRoll(random, GetBoxChance()))
+            if (IsEnabled(Category.Boxes)
+                && HasPrefabsFor(Category.Boxes)
+                && TryRoll(random, GetBoxChance()))
             {
-                TrySpawnBoxRow(map, section, distance, root, random);
-                return;
+                return TrySpawnBoxRow(map, section, distance, root, random);
             }
 
-            if (IsEnabled(Category.Balls) && TryRoll(random, GetBallFlatChance()))
+            if (IsEnabled(Category.Balls)
+                && HasPrefabsFor(Category.Balls)
+                && TryRoll(random, GetBallFlatChance()))
             {
-                TrySpawnRandomInsideTrack(map, section, distance, GetEntries(Category.Balls), GetOverrides(Category.Balls), root, random, TrackSpawnPriority.Medium);
-                return;
+                return TrySpawnRandomInsideTrack(map, section, distance, GetEntries(Category.Balls), GetOverrides(Category.Balls), root, random, TrackSpawnPriority.Medium);
             }
 
-            if (IsEnabled(Category.Fans) && TryRoll(random, GetFanFlatChance()))
+            if (IsEnabled(Category.Fans)
+                && HasPrefabsFor(Category.Fans)
+                && TryRoll(random, GetFanFlatChance()))
             {
-                TrySpawnFan(map, section, distance, root, random);
-                return;
+                return TrySpawnFan(map, section, distance, root, random);
             }
         }
 
         if (IsNarrowSolid(section))
         {
-            if (IsEnabled(Category.Boxes) && TryRoll(random, GetBoxChance()))
+            if (IsEnabled(Category.Boxes)
+                && HasPrefabsFor(Category.Boxes)
+                && TryRoll(random, GetBoxChance()))
             {
-                TrySpawnSingleBoxAtCenter(map, distance, root, random);
-                return;
+                return TrySpawnSingleBoxAtCenter(map, distance, root, random);
             }
 
-            if (IsEnabled(Category.Balls) && TryRoll(random, GetBallNarrowChance()))
+            if (IsEnabled(Category.Balls)
+                && HasPrefabsFor(Category.Balls)
+                && TryRoll(random, GetBallNarrowChance()))
             {
-                TrySpawnCentered(map, distance, GetEntries(Category.Balls), GetOverrides(Category.Balls), root, random, TrackSpawnPriority.Medium);
-                return;
+                return TrySpawnCentered(map, distance, GetEntries(Category.Balls), GetOverrides(Category.Balls), root, random, TrackSpawnPriority.Medium);
             }
         }
 
         if (IsRail(section))
         {
-            if (IsEnabled(Category.Balls) && TryRoll(random, GetBallRailChance()))
+            if (IsEnabled(Category.Balls)
+                && HasPrefabsFor(Category.Balls)
+                && TryRoll(random, GetBallRailChance()))
             {
-                TrySpawnCentered(map, distance, GetEntries(Category.Balls), GetOverrides(Category.Balls), root, random, TrackSpawnPriority.Medium);
-                return;
+                return TrySpawnCentered(map, distance, GetEntries(Category.Balls), GetOverrides(Category.Balls), root, random, TrackSpawnPriority.Medium);
             }
 
-            if (IsEnabled(Category.Fans) && IsStraightRail(section) && TryRoll(random, GetFanStraightRailChance()))
+            if (IsEnabled(Category.Fans)
+                && HasPrefabsFor(Category.Fans)
+                && IsStraightRail(section)
+                && TryRoll(random, GetFanStraightRailChance()))
             {
-                TrySpawnFan(map, section, distance, root, random);
-                return;
+                return TrySpawnFan(map, section, distance, root, random);
             }
         }
 
         if (IsEnabled(Category.Balls)
+            && HasPrefabsFor(Category.Balls)
             && IsBeforeDownSlope(sections, sectionIndex, distance)
             && TryRoll(random, GetBallBeforeDownSlopeChance()))
         {
-            TrySpawnRandomInsideTrack(map, section, distance, GetEntries(Category.Balls), GetOverrides(Category.Balls), root, random, TrackSpawnPriority.Medium);
+            return TrySpawnRandomInsideTrack(map, section, distance, GetEntries(Category.Balls), GetOverrides(Category.Balls), root, random, TrackSpawnPriority.Medium);
         }
+
+        return false;
     }
+
+    #endregion
+
+    #region Coin Generation
 
     private void GenerateCoins(TrackRuntimeMap map, Transform root, System.Random random)
     {
@@ -267,13 +344,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
             float segmentEnd = segmentStart + segmentLength;
             int remainingCoins = requestedCoinCount - placedCoins;
 
-            placedCoins += TrySpawnCoinPatternInSegment(
-                map,
-                segmentStart,
-                segmentEnd,
-                remainingCoins,
-                root,
-                random);
+            placedCoins += TrySpawnCoinPatternInSegment(map, segmentStart, segmentEnd, remainingCoins, root, random);
         }
     }
 
@@ -287,10 +358,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
     {
         for (int attempt = 0; attempt < contentProfile.CoinPlacementAttempts; attempt++)
         {
-            int patternCoinCount = random.Next(
-                contentProfile.MinCoinsPerPattern,
-                contentProfile.MaxCoinsPerPattern + 1);
-
+            int patternCoinCount = random.Next(contentProfile.MinCoinsPerPattern, contentProfile.MaxCoinsPerPattern + 1);
             patternCoinCount = Mathf.Min(patternCoinCount, remainingCoins);
 
             if (patternCoinCount <= 0)
@@ -306,11 +374,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
                 patternLength = Mathf.Max(0f, (patternCoinCount - 1) * contentProfile.CoinPatternDistanceSpacing);
             }
 
-            float centerDistance = RandomRange(
-                random,
-                startDistance + (patternLength * 0.5f),
-                endDistance - (patternLength * 0.5f));
-
+            float centerDistance = RandomRange(random, startDistance + (patternLength * 0.5f), endDistance - (patternLength * 0.5f));
             CoinPatternType patternType = PickCoinPattern(random);
             List<CoinSpawnPoint> points = BuildCoinPatternPoints(map, centerDistance, patternCoinCount, patternLength, patternType);
 
@@ -330,11 +394,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
         return 0;
     }
 
-    private int TryPlaceCoinPattern(
-        TrackRuntimeMap map,
-        List<CoinSpawnPoint> points,
-        Transform root,
-        System.Random random)
+    private int TryPlaceCoinPattern(TrackRuntimeMap map, List<CoinSpawnPoint> points, Transform root, System.Random random)
     {
         int placed = 0;
 
@@ -352,12 +412,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
             float safeLimit = Mathf.Max(0f, halfWidth - contentProfile.CoinEdgePadding - (contentProfile.CoinReservationWidth * 0.5f));
             float clampedLateral = Mathf.Clamp(point.Lateral, -safeLimit, safeLimit);
 
-            if (!reservationMap.TryReserve(
-                    point.Distance,
-                    clampedLateral,
-                    contentProfile.CoinReservationLength,
-                    contentProfile.CoinReservationWidth,
-                    TrackSpawnPriority.Low))
+            if (!reservationMap.TryReserve(point.Distance, clampedLateral, contentProfile.CoinReservationLength, contentProfile.CoinReservationWidth, TrackSpawnPriority.Low))
             {
                 continue;
             }
@@ -385,6 +440,68 @@ public sealed class TrackContentGenerator : MonoBehaviour
         return placed;
     }
 
+    private List<CoinSpawnPoint> BuildCoinPatternPoints(
+        TrackRuntimeMap map,
+        float centerDistance,
+        int count,
+        float patternLength,
+        CoinPatternType patternType)
+    {
+        List<CoinSpawnPoint> points = new List<CoinSpawnPoint>();
+
+        if (count <= 0)
+        {
+            return points;
+        }
+
+        float startDistance = centerDistance - (patternLength * 0.5f);
+
+        for (int i = 0; i < count; i++)
+        {
+            float t = count == 1 ? 0.5f : i / (float)(count - 1);
+            float distance = startDistance + (i * contentProfile.CoinPatternDistanceSpacing);
+            TrackSectionDefinition section = FindSectionAtDistance(map.Sections, distance);
+
+            if (!CanSpawnCoinOnSection(section))
+            {
+                continue;
+            }
+
+            float halfWidth = ResolveSectionWidth(section) * 0.5f;
+            float safeLimit = Mathf.Max(0f, halfWidth - contentProfile.CoinEdgePadding - (contentProfile.CoinReservationWidth * 0.5f));
+            float amplitude = Mathf.Min(contentProfile.CoinPatternLateralAmplitude, safeLimit);
+            float lateral = ResolveCoinPatternLateral(patternType, i, t, amplitude);
+
+            points.Add(new CoinSpawnPoint(distance, lateral));
+        }
+
+        return points;
+    }
+
+    private static float ResolveCoinPatternLateral(CoinPatternType patternType, int index, float t, float amplitude)
+    {
+        return patternType switch
+        {
+            CoinPatternType.Single => 0f,
+            CoinPatternType.CenterLine => 0f,
+            CoinPatternType.ZigZag => index % 2 == 0 ? -amplitude : amplitude,
+            CoinPatternType.LeftLine => -amplitude,
+            CoinPatternType.RightLine => amplitude,
+            CoinPatternType.Arc => Mathf.Lerp(-amplitude, amplitude, t),
+            _ => 0f
+        };
+    }
+
+    private static CoinPatternType PickCoinPattern(System.Random random)
+    {
+        int value = random.Next(0, 6);
+        return (CoinPatternType)value;
+    }
+
+    #endregion
+
+    #region Goal Generation
+
     private GoalSpawnData ResolveGoalSpawnData(TrackRuntimeMap map)
     {
         if (levelSettings != null && !levelSettings.EnableGoal)
@@ -398,6 +515,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
         }
 
         TrackSectionDefinition finishSection = FindFinishSection(map.Sections);
+
         float goalDistance = Mathf.Lerp(finishSection.StartDistance, finishSection.EndDistance, 0.5f);
         TrackSample sample = map.PathSampler.SampleAtDistance(goalDistance);
 
@@ -429,25 +547,20 @@ public sealed class TrackContentGenerator : MonoBehaviour
             return;
         }
 
-        objectPool.Spawn(
-            contentProfile.GoalPrefab,
-            resolvedGoalData.Position,
-            resolvedGoalData.Rotation,
-            root);
+        objectPool.Spawn(contentProfile.GoalPrefab, resolvedGoalData.Position, resolvedGoalData.Rotation, root);
     }
 
-    private void TrySpawnBoxRow(
-        TrackRuntimeMap map,
-        TrackSectionDefinition section,
-        float distance,
-        Transform root,
-        System.Random random)
+    #endregion
+
+    #region Spawn Helpers
+
+    private bool TrySpawnBoxRow(TrackRuntimeMap map, TrackSectionDefinition section, float distance, Transform root, System.Random random)
     {
         TrackSpawnPrefabEntry entry = PickWeighted(GetEntries(Category.Boxes), GetOverrides(Category.Boxes), levelSettings, random);
 
         if (entry == null)
         {
-            return;
+            return false;
         }
 
         float trackWidth = ResolveSectionWidth(section);
@@ -459,41 +572,39 @@ public sealed class TrackContentGenerator : MonoBehaviour
 
         if (maxBoxesThatFit <= 0)
         {
-            return;
+            return false;
         }
 
         int boxCount = contentProfile.AllowMultipleBoxesPerRow
             ? random.Next(1, maxBoxesThatFit + 1)
             : 1;
 
-        List<float> lateralOffsets = BuildCenteredRowOffsets(
-            boxCount,
-            entry.ReservationWidth,
-            contentProfile.BoxLateralSpacing);
+        List<float> lateralOffsets = BuildCenteredRowOffsets(boxCount, entry.ReservationWidth, contentProfile.BoxLateralSpacing);
 
+        bool anyPlaced = false;
         for (int i = 0; i < lateralOffsets.Count; i++)
         {
-            TrySpawnEntryAtLateral(map, distance, lateralOffsets[i], entry, root, TrackSpawnPriority.Medium);
+            if (TrySpawnEntryAtLateral(map, distance, lateralOffsets[i], entry, root, TrackSpawnPriority.Medium))
+            {
+                anyPlaced = true;
+            }
         }
+        return anyPlaced;
     }
 
-    private void TrySpawnSingleBoxAtCenter(
-        TrackRuntimeMap map,
-        float distance,
-        Transform root,
-        System.Random random)
+    private bool TrySpawnSingleBoxAtCenter(TrackRuntimeMap map, float distance, Transform root, System.Random random)
     {
         TrackSpawnPrefabEntry entry = PickWeighted(GetEntries(Category.Boxes), GetOverrides(Category.Boxes), levelSettings, random);
 
         if (entry == null)
         {
-            return;
+            return false;
         }
 
-        TrySpawnEntryAtLateral(map, distance, 0f, entry, root, TrackSpawnPriority.Medium);
+        return TrySpawnEntryAtLateral(map, distance, 0f, entry, root, TrackSpawnPriority.Medium);
     }
 
-    private void TrySpawnCentered(
+    private bool TrySpawnCentered(
         TrackRuntimeMap map,
         float distance,
         IReadOnlyList<TrackSpawnPrefabEntry> entries,
@@ -506,13 +617,13 @@ public sealed class TrackContentGenerator : MonoBehaviour
 
         if (entry == null)
         {
-            return;
+            return false;
         }
 
-        TrySpawnEntryAtLateral(map, distance, 0f, entry, root, priority);
+        return TrySpawnEntryAtLateral(map, distance, 0f, entry, root, priority);
     }
 
-    private void TrySpawnRandomInsideTrack(
+    private bool TrySpawnRandomInsideTrack(
         TrackRuntimeMap map,
         TrackSectionDefinition section,
         float distance,
@@ -526,14 +637,14 @@ public sealed class TrackContentGenerator : MonoBehaviour
 
         if (entry == null)
         {
-            return;
+            return false;
         }
 
         float halfWidth = ResolveSectionWidth(section) * 0.5f;
         float safeLimit = Mathf.Max(0f, halfWidth - (entry.ReservationWidth * 0.5f) - contentProfile.BoxEdgePadding);
         float lateral = RandomRange(random, -safeLimit, safeLimit);
 
-        TrySpawnEntryAtLateral(map, distance, lateral, entry, root, priority);
+        return TrySpawnEntryAtLateral(map, distance, lateral, entry, root, priority);
     }
 
     private bool TrySpawnEntryAtLateral(
@@ -569,18 +680,13 @@ public sealed class TrackContentGenerator : MonoBehaviour
         return true;
     }
 
-    private void TrySpawnFan(
-        TrackRuntimeMap map,
-        TrackSectionDefinition section,
-        float distance,
-        Transform root,
-        System.Random random)
+    private bool TrySpawnFan(TrackRuntimeMap map, TrackSectionDefinition section, float distance, Transform root, System.Random random)
     {
         TrackSpawnPrefabEntry entry = PickWeighted(GetEntries(Category.Fans), GetOverrides(Category.Fans), levelSettings, random);
 
         if (entry == null)
         {
-            return;
+            return false;
         }
 
         int side = contentProfile.RandomizeFanSide
@@ -593,8 +699,12 @@ public sealed class TrackContentGenerator : MonoBehaviour
              + (entry.ReservationWidth * 0.5f))
             * side;
 
-        TrySpawnEntryAtLateral(map, distance, lateral, entry, root, TrackSpawnPriority.Medium);
+        return TrySpawnEntryAtLateral(map, distance, lateral, entry, root, TrackSpawnPriority.Medium);
     }
+
+    #endregion
+
+    #region Level Settings Accessors
 
     private bool IsEnabled(Category category)
     {
@@ -612,6 +722,15 @@ public sealed class TrackContentGenerator : MonoBehaviour
             Category.Coins => levelSettings.EnableCoins,
             _ => true
         };
+    }
+
+    /// <summary>
+    /// Indica si una categoría tiene al menos un prefab usable en el catálogo activo.
+    /// Evita desperdiciar rolls y contabilizar obstáculos fantasma cuando la lista está vacía.
+    /// </summary>
+    private bool HasPrefabsFor(Category category)
+    {
+        return HasUsablePrefabs(GetEntries(category), GetOverrides(category), levelSettings);
     }
 
     private IReadOnlyList<TrackSpawnPrefabEntry> GetEntries(Category category)
@@ -656,15 +775,11 @@ public sealed class TrackContentGenerator : MonoBehaviour
 
     private int ResolveCoinCount(System.Random random)
     {
-        bool useRandom = levelSettings != null
-            ? levelSettings.UseRandomCoinCount
-            : contentProfile.BaseUseRandomCoinCount;
+        bool useRandom = levelSettings != null ? levelSettings.UseRandomCoinCount : contentProfile.BaseUseRandomCoinCount;
 
         if (!useRandom)
         {
-            return levelSettings != null
-                ? levelSettings.FixedCoinCount
-                : contentProfile.BaseFixedCoinCount;
+            return levelSettings != null ? levelSettings.FixedCoinCount : contentProfile.BaseFixedCoinCount;
         }
 
         int min = levelSettings != null ? levelSettings.MinRandomCoinCount : contentProfile.BaseMinRandomCoinCount;
@@ -673,13 +788,17 @@ public sealed class TrackContentGenerator : MonoBehaviour
         return random.Next(min, max + 1);
     }
 
+    #endregion
+
+    #region Weighted Selection
+
     private static TrackSpawnPrefabEntry PickWeighted(
         IReadOnlyList<TrackSpawnPrefabEntry> entries,
         IReadOnlyList<LevelSpawnPrefabOverride> overrides,
-        LevelContentGenerationSettings levelSettings,
+        LevelContentGenerationSettings settings,
         System.Random random)
     {
-        if (!HasUsablePrefabs(entries, overrides, levelSettings))
+        if (!HasUsablePrefabs(entries, overrides, settings))
         {
             return null;
         }
@@ -688,7 +807,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
 
         for (int i = 0; i < entries.Count; i++)
         {
-            float weight = ResolveWeight(entries[i], overrides, levelSettings);
+            float weight = ResolveWeight(entries[i], overrides, settings);
             totalWeight += Mathf.Max(0f, weight);
         }
 
@@ -703,7 +822,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
         for (int i = 0; i < entries.Count; i++)
         {
             TrackSpawnPrefabEntry entry = entries[i];
-            float weight = ResolveWeight(entry, overrides, levelSettings);
+            float weight = ResolveWeight(entry, overrides, settings);
 
             if (entry == null || entry.Prefab == null || weight <= 0f)
             {
@@ -724,14 +843,14 @@ public sealed class TrackContentGenerator : MonoBehaviour
     private static float ResolveWeight(
         TrackSpawnPrefabEntry entry,
         IReadOnlyList<LevelSpawnPrefabOverride> overrides,
-        LevelContentGenerationSettings levelSettings)
+        LevelContentGenerationSettings settings)
     {
         if (entry == null || entry.Prefab == null || string.IsNullOrWhiteSpace(entry.Id))
         {
             return 0f;
         }
 
-        if (levelSettings == null || overrides == null)
+        if (settings == null || overrides == null)
         {
             return entry.BaseSelectionWeight;
         }
@@ -740,7 +859,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
 
         if (overrideEntry == null)
         {
-            return levelSettings.UseOverridesAsWhitelist ? 0f : entry.BaseSelectionWeight;
+            return settings.UseOverridesAsWhitelist ? 0f : entry.BaseSelectionWeight;
         }
 
         if (!overrideEntry.EnabledInLevel)
@@ -753,9 +872,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
             : entry.BaseSelectionWeight;
     }
 
-    private static LevelSpawnPrefabOverride FindOverride(
-        string id,
-        IReadOnlyList<LevelSpawnPrefabOverride> overrides)
+    private static LevelSpawnPrefabOverride FindOverride(string id, IReadOnlyList<LevelSpawnPrefabOverride> overrides)
     {
         if (overrides == null)
         {
@@ -776,7 +893,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
     private static bool HasUsablePrefabs(
         IReadOnlyList<TrackSpawnPrefabEntry> entries,
         IReadOnlyList<LevelSpawnPrefabOverride> overrides,
-        LevelContentGenerationSettings levelSettings)
+        LevelContentGenerationSettings settings)
     {
         if (entries == null || entries.Count == 0)
         {
@@ -785,7 +902,7 @@ public sealed class TrackContentGenerator : MonoBehaviour
 
         for (int i = 0; i < entries.Count; i++)
         {
-            if (ResolveWeight(entries[i], overrides, levelSettings) > 0f)
+            if (ResolveWeight(entries[i], overrides, settings) > 0f)
             {
                 return true;
             }
@@ -794,124 +911,9 @@ public sealed class TrackContentGenerator : MonoBehaviour
         return false;
     }
 
-    private bool CanGenerate()
-    {
-        if (trackGenerator == null || trackGenerator.GeneratedMap == null || contentProfile == null)
-        {
-            Debug.LogWarning("[TRACK CONTENT] Missing TrackGenerator, generated map, or content profile.", this);
-            return false;
-        }
+    #endregion
 
-        return true;
-    }
-
-    private List<CoinSpawnPoint> BuildCoinPatternPoints(
-        TrackRuntimeMap map,
-        float centerDistance,
-        int count,
-        float patternLength,
-        CoinPatternType patternType)
-    {
-        List<CoinSpawnPoint> points = new List<CoinSpawnPoint>();
-
-        if (count <= 0)
-        {
-            return points;
-        }
-
-        float startDistance = centerDistance - (patternLength * 0.5f);
-
-        for (int i = 0; i < count; i++)
-        {
-            float t = count == 1 ? 0.5f : i / (float)(count - 1);
-            float distance = startDistance + (i * contentProfile.CoinPatternDistanceSpacing);
-            TrackSectionDefinition section = FindSectionAtDistance(map.Sections, distance);
-
-            if (!CanSpawnCoinOnSection(section))
-            {
-                continue;
-            }
-
-            float halfWidth = ResolveSectionWidth(section) * 0.5f;
-            float safeLimit = Mathf.Max(0f, halfWidth - contentProfile.CoinEdgePadding - (contentProfile.CoinReservationWidth * 0.5f));
-            float amplitude = Mathf.Min(contentProfile.CoinPatternLateralAmplitude, safeLimit);
-            float lateral = ResolveCoinPatternLateral(patternType, i, t, amplitude);
-
-            points.Add(new CoinSpawnPoint(distance, lateral));
-        }
-
-        return points;
-    }
-
-    private static float ResolveCoinPatternLateral(
-        CoinPatternType patternType,
-        int index,
-        float t,
-        float amplitude)
-    {
-        return patternType switch
-        {
-            CoinPatternType.Single => 0f,
-            CoinPatternType.CenterLine => 0f,
-            CoinPatternType.ZigZag => index % 2 == 0 ? -amplitude : amplitude,
-            CoinPatternType.LeftLine => -amplitude,
-            CoinPatternType.RightLine => amplitude,
-            CoinPatternType.Arc => Mathf.Lerp(-amplitude, amplitude, t),
-            _ => 0f
-        };
-    }
-
-    private static CoinPatternType PickCoinPattern(System.Random random)
-    {
-        int value = random.Next(0, 6);
-        return (CoinPatternType)value;
-    }
-
-    private static List<float> BuildCenteredRowOffsets(int count, float reservationWidth, float spacing)
-    {
-        List<float> offsets = new List<float>();
-
-        if (count <= 0)
-        {
-            return offsets;
-        }
-
-        if (count == 1)
-        {
-            offsets.Add(0f);
-            return offsets;
-        }
-
-        float step = reservationWidth + spacing;
-        float start = -step * (count - 1) * 0.5f;
-
-        for (int i = 0; i < count; i++)
-        {
-            offsets.Add(start + (step * i));
-        }
-
-        return offsets;
-    }
-
-    private bool IsBeforeDownSlope(IReadOnlyList<TrackSectionDefinition> sections, int currentIndex, float currentDistance)
-    {
-        for (int i = currentIndex + 1; i < sections.Count; i++)
-        {
-            TrackSectionDefinition next = sections[i];
-
-            if (next.StartDistance - currentDistance > contentProfile.BeforeDownSlopeWindow)
-            {
-                return false;
-            }
-
-            if (next.SlopeHeightDelta < -0.001f)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    #region Section Classification
 
     private static bool IsFlatSolid(TrackSectionDefinition section)
     {
@@ -950,6 +952,26 @@ public sealed class TrackContentGenerator : MonoBehaviour
                && section.StructureType != TrackStructureType.RailTrack;
     }
 
+    private bool IsBeforeDownSlope(IReadOnlyList<TrackSectionDefinition> sections, int currentIndex, float currentDistance)
+    {
+        for (int i = currentIndex + 1; i < sections.Count; i++)
+        {
+            TrackSectionDefinition next = sections[i];
+
+            if (next.StartDistance - currentDistance > contentProfile.BeforeDownSlopeWindow)
+            {
+                return false;
+            }
+
+            if (next.SlopeHeightDelta < -0.001f)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static TrackSectionDefinition FindSectionAtDistance(IReadOnlyList<TrackSectionDefinition> sections, float distance)
     {
         for (int i = 0; i < sections.Count; i++)
@@ -981,6 +1003,21 @@ public sealed class TrackContentGenerator : MonoBehaviour
         return Mathf.Min(section.StartWidth, section.EndWidth);
     }
 
+    #endregion
+
+    #region Misc Helpers
+
+    private bool CanGenerate()
+    {
+        if (trackGenerator == null || trackGenerator.GeneratedMap == null || contentProfile == null)
+        {
+            Debug.LogWarning("[TRACK CONTENT] Missing TrackGenerator, generated map, or content profile.", this);
+            return false;
+        }
+
+        return true;
+    }
+
     private static bool TryRoll(System.Random random, float chance)
     {
         return chance > 0f && (chance >= 1f || random.NextDouble() <= chance);
@@ -995,6 +1032,36 @@ public sealed class TrackContentGenerator : MonoBehaviour
 
         return Mathf.Lerp(min, max, (float)random.NextDouble());
     }
+
+    private static List<float> BuildCenteredRowOffsets(int count, float reservationWidth, float spacing)
+    {
+        List<float> offsets = new List<float>();
+
+        if (count <= 0)
+        {
+            return offsets;
+        }
+
+        if (count == 1)
+        {
+            offsets.Add(0f);
+            return offsets;
+        }
+
+        float step = reservationWidth + spacing;
+        float start = -step * (count - 1) * 0.5f;
+
+        for (int i = 0; i < count; i++)
+        {
+            offsets.Add(start + (step * i));
+        }
+
+        return offsets;
+    }
+
+    #endregion
+
+    #region Private Types
 
     private enum Category
     {
@@ -1045,5 +1112,5 @@ public sealed class TrackContentGenerator : MonoBehaviour
         }
     }
 
-
+    #endregion
 }

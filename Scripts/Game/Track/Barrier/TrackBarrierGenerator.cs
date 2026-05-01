@@ -2,7 +2,11 @@ using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
-/// Genera barreras cilíndricas laterales y una pared inicial independiente usando el mapa runtime final.
+/// Genera barreras cilíndricas laterales y una pared inicial usando el mapa runtime final.
+///
+/// En modo de progresión infinita, los parámetros de zona segura se inyectan desde
+/// <see cref="TrackGeneratorController"/> mediante <see cref="Rebuild(TrackRuntimeMap, LevelGenerationSettings)"/>.
+/// No existe ninguna referencia a LevelGenerationSettings en el Inspector de este componente.
 /// </summary>
 public sealed class TrackBarrierGenerator : MonoBehaviour
 {
@@ -10,12 +14,8 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
 
     [Header("References")]
     [SerializeField]
-    [Tooltip("Generador principal del track.")]
+    [Tooltip("Generador principal del track. Necesario solo para el context menu de editor.")]
     private TrackGeneratorController trackGenerator;
-
-    [SerializeField]
-    [Tooltip("Configuración específica del nivel actual.")]
-    private LevelGenerationSettings levelGenerationSettings;
 
     [Header("Generated Root")]
     [SerializeField]
@@ -96,7 +96,7 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
     private float generalBarrierChance = 0.55f;
 
     [SerializeField]
-    [Tooltip("Porcentaje máximo aproximado del mapa que puede recibir barreras laterales generales, sin contar zonas seguras.")]
+    [Tooltip("Porcentaje máximo aproximado del mapa que puede recibir barreras laterales generales.")]
     [Range(0f, 1f)]
     private float generalCoverageRatio = 0.5f;
 
@@ -106,11 +106,11 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
     private bool generateColliders = true;
 
     [SerializeField]
-    [Tooltip("Si está activo, las barreras cilíndricas usan CapsuleCollider por segmento en vez de MeshCollider.")]
+    [Tooltip("Si está activo, las barreras cilíndricas usan CapsuleCollider por segmento.")]
     private bool usePrimitiveCylindricalBarrierColliders = true;
 
     [SerializeField]
-    [Tooltip("Multiplicador del radio físico de las barreras cilíndricas. Usa valores mayores a 1 si la bola atraviesa visualmente la textura.")]
+    [Tooltip("Multiplicador del radio físico de las barreras cilíndricas.")]
     private float cylindricalBarrierColliderRadiusMultiplier = 1.35f;
 
     [SerializeField]
@@ -132,10 +132,89 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
 
     #endregion
 
+    #region Runtime
+
+    // Valores de zona segura inyectados por Rebuild(map, settings).
+    // Defaults sensatos para cuando se llama desde el context menu sin settings.
+    private bool activeGenerateStartSafeZoneBarriers = true;
+    private bool activeGenerateEndSafeZoneBarriers = true;
+    private float activeSafeStartLengthOverride = -1f;
+    private float activeSafeEndLengthOverride = -1f;
+
+    /// <summary>Probabilidad de barrera inyectada por InfiniteLevelManager. -1 = usar Inspector.</summary>
+    private float activeBarrierChance = -1f;
+
+    /// <summary>Coverage inyectado por InfiniteLevelManager. -1 = usar Inspector.</summary>
+    private float activeBarrierCoverageRatio = -1f;
+
+    /// <summary>Longitud real de zona segura inicial, calculada por el track generator.</summary>
+    private float activeSafeZoneStartLength = 0f;
+
+    /// <summary>Longitud real de zona segura final, calculada por el track generator.</summary>
+    private float activeSafeZoneEndLength = 0f;
+
+    #endregion
+
+    #region Unity Lifecycle
+
+    private void Start()
+    {
+        if (rebuildOnStart && trackGenerator != null)
+        {
+            RebuildFromTrackGenerator();
+        }
+    }
+
+    #endregion
+
     #region Public API
 
     /// <summary>
+    /// Probabilidad base de barreras del Inspector.
+    /// InfiniteLevelManager la lee como el MÁXIMO desde el que baja la progresión.
+    /// </summary>
+    public float GeneralBarrierChance => generalBarrierChance;
+
+    /// <summary>
+    /// Coverage ratio base del Inspector.
+    /// InfiniteLevelManager lo lee como el MÁXIMO desde el que baja la progresión.
+    /// </summary>
+    public float GeneralCoverageRatio => generalCoverageRatio;
+
+    /// <summary>
+    /// Inyecta las longitudes reales de zona segura calculadas por el track generator.
+    /// Estas zonas siempre tienen barreras si están habilitadas, sin importar la probabilidad general.
+    /// Llamar antes de GenerateLevel.
+    /// </summary>
+    public void SetSafeZoneLengths(float startLength, float endLength)
+    {
+        activeSafeZoneStartLength = Mathf.Max(0f, startLength);
+        activeSafeZoneEndLength = Mathf.Max(0f, endLength);
+    }
+
+    /// <summary>
+    /// Inyecta probabilidad de barrera para el siguiente Rebuild.
+    /// Llamado por InfiniteLevelManager antes de GenerateLevel.
+    /// </summary>
+    public void SetBarrierProbability(float chance, float coverageRatio)
+    {
+        activeBarrierChance = Mathf.Clamp01(chance);
+        activeBarrierCoverageRatio = Mathf.Clamp01(coverageRatio);
+    }
+
+    /// <summary>
+    /// Fuerza barreras en toda la pista (100% / 100%).
+    /// Usado para los primeros niveles garantizados y niveles bonus.
+    /// </summary>
+    public void ForceFullBarriers()
+    {
+        activeBarrierChance = 1f;
+        activeBarrierCoverageRatio = 1f;
+    }
+
+    /// <summary>
     /// Reconstruye las barreras usando el mapa runtime actual del TrackGeneratorController.
+    /// Útil desde el context menu en el editor.
     /// </summary>
     [ContextMenu("Rebuild Barriers From Track Generator")]
     public void RebuildFromTrackGenerator()
@@ -150,7 +229,27 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
     }
 
     /// <summary>
+    /// Inyecta los settings de nivel activos y reconstruye todas las barreras.
+    /// Punto de entrada principal desde <see cref="TrackGeneratorController"/>.
+    /// </summary>
+    /// <param name="runtimeMap">Mapa runtime de la pista generada.</param>
+    /// <param name="settings">Settings del nivel actual que contienen configuración de zonas seguras.</param>
+    public void Rebuild(TrackRuntimeMap runtimeMap, LevelGenerationSettings settings)
+    {
+        if (settings != null)
+        {
+            activeGenerateStartSafeZoneBarriers = settings.GenerateStartSafeZoneBarriers;
+            activeGenerateEndSafeZoneBarriers = settings.GenerateEndSafeZoneBarriers;
+            activeSafeStartLengthOverride = settings.SafeStartLengthOverride;
+            activeSafeEndLengthOverride = settings.SafeEndLengthOverride;
+        }
+
+        Rebuild(runtimeMap);
+    }
+
+    /// <summary>
     /// Reconstruye todas las barreras a partir de un mapa runtime generado.
+    /// Usa los valores de zona segura inyectados previamente.
     /// </summary>
     public void Rebuild(TrackRuntimeMap runtimeMap)
     {
@@ -183,7 +282,7 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
     /// <summary>
     /// Elimina todas las barreras generadas.
     /// </summary>
-    [ContextMenu("Clear Barriers")]
+    [ContextMenu("Clear Generated Barriers")]
     public void ClearGeneratedBarriers()
     {
         Transform existingRoot = transform.Find(generatedRootName);
@@ -219,29 +318,16 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
 
     #endregion
 
-    #region Unity Lifecycle
-
-    private void Reset()
-    {
-        trackGenerator = GetComponent<TrackGeneratorController>();
-    }
-
-    private void Start()
-    {
-        if (!rebuildOnStart)
-        {
-            return;
-        }
-
-        RebuildFromTrackGenerator();
-    }
-
-    #endregion
-
-    #region Selection
+    #region Chunk Selection
 
     /// <summary>
-    /// Decide qué chunks recibirán barreras laterales usando la misma semilla del nivel.
+    /// Decide qué chunks recibirán barreras laterales.
+    ///
+    /// Fase 1 — Zonas seguras: siempre activas si están habilitadas.
+    /// Fase 2 — Barreras generales: selecciona exactamente el X% de las secciones
+    /// válidas fuera de zonas seguras (basado en conteo de chunks, no en distancia).
+    /// Si resolvedCoverageRatio = 0.2 → exactamente el 20% de los chunks válidos
+    /// reciben barreras, elegidos aleatoriamente.
     /// </summary>
     private bool[] ResolveSelectedChunks(TrackRuntimeMap runtimeMap)
     {
@@ -249,110 +335,99 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
         bool[] selected = new bool[chunks.Count];
 
         float totalDistance = ResolveTotalDistance(runtimeMap);
-        float safeStartLength = ResolveSafeStartLength(totalDistance);
-        float safeEndLength = ResolveSafeEndLength(totalDistance);
-        float generalCoverageLimit = Mathf.Max(0f, totalDistance * generalCoverageRatio);
-        float coveredGeneralDistance = 0f;
+        float safeStartLength = activeSafeZoneStartLength;
+        float safeEndLength = activeSafeZoneEndLength;
+
+        float resolvedCoverageRatio = activeBarrierCoverageRatio >= 0f
+            ? activeBarrierCoverageRatio
+            : generalCoverageRatio;
 
         System.Random random = new System.Random(runtimeMap.GeneratedSeed);
 
+        // ── FASE 1: Zonas seguras — siempre generan independientemente de la probabilidad ──
         for (int i = 0; i < chunks.Count; i++)
         {
             TrackSurfaceChunkDefinition chunk = chunks[i];
 
             if (!IsChunkValidForBarrier(chunk))
             {
-                selected[i] = false;
                 continue;
             }
 
-            bool isStartSafeChunk = ChunkOverlapsRange(chunk, 0f, safeStartLength);
-            bool isEndSafeChunk = ChunkOverlapsRange(chunk, totalDistance - safeEndLength, totalDistance);
+            bool isStartSafe = safeStartLength > 0f && ChunkOverlapsRange(chunk, 0f, safeStartLength);
+            bool isEndSafe = safeEndLength > 0f
+                && ChunkOverlapsRange(chunk, totalDistance - safeEndLength, totalDistance);
 
-            if (isStartSafeChunk && levelGenerationSettings != null && levelGenerationSettings.GenerateStartSafeZoneBarriers)
+            if (isStartSafe && activeGenerateStartSafeZoneBarriers)
             {
                 selected[i] = true;
-                continue;
             }
-
-            if (isEndSafeChunk && levelGenerationSettings != null && levelGenerationSettings.GenerateEndSafeZoneBarriers)
+            else if (isEndSafe && activeGenerateEndSafeZoneBarriers)
             {
                 selected[i] = true;
-                continue;
             }
-
-            float chunkLength = Mathf.Max(0f, chunk.EndDistance - chunk.StartDistance);
-
-            if (coveredGeneralDistance >= generalCoverageLimit)
-            {
-                selected[i] = false;
-                continue;
-            }
-
-            if (random.NextDouble() > generalBarrierChance)
-            {
-                selected[i] = false;
-                continue;
-            }
-
-            selected[i] = true;
-            coveredGeneralDistance += chunkLength;
         }
 
-        EnsureAtLeastOneGeneralChunkIfNeeded(
-            chunks,
-            selected,
-            totalDistance,
-            safeStartLength,
-            safeEndLength);
+        // ── FASE 2: Barreras generales — X% exacto de chunks válidos fuera de zonas seguras ──
+        if (resolvedCoverageRatio <= 0f)
+        {
+            return selected;
+        }
+
+        // Recolectar índices de chunks candidatos (válidos, fuera de zonas seguras, no ya seleccionados).
+        List<int> candidateIndices = new List<int>();
+
+        for (int i = 0; i < chunks.Count; i++)
+        {
+            if (selected[i])
+            {
+                continue;
+            }
+
+            TrackSurfaceChunkDefinition chunk = chunks[i];
+
+            if (!IsChunkValidForBarrier(chunk))
+            {
+                continue;
+            }
+
+            bool isStartSafe = safeStartLength > 0f && ChunkOverlapsRange(chunk, 0f, safeStartLength);
+            bool isEndSafe = safeEndLength > 0f
+                && ChunkOverlapsRange(chunk, totalDistance - safeEndLength, totalDistance);
+
+            if (!isStartSafe && !isEndSafe)
+            {
+                candidateIndices.Add(i);
+            }
+        }
+
+        if (candidateIndices.Count == 0)
+        {
+            return selected;
+        }
+
+        // Mezcla aleatoria (Fisher-Yates) para distribuir las barreras uniformemente.
+        for (int i = candidateIndices.Count - 1; i > 0; i--)
+        {
+            int j = random.Next(0, i + 1);
+            int temp = candidateIndices[i];
+            candidateIndices[i] = candidateIndices[j];
+            candidateIndices[j] = temp;
+        }
+
+        // Seleccionar exactamente el X% de los candidatos.
+        int countToSelect = Mathf.Max(0, Mathf.RoundToInt(candidateIndices.Count * resolvedCoverageRatio));
+
+        for (int i = 0; i < countToSelect; i++)
+        {
+            selected[candidateIndices[i]] = true;
+        }
 
         return selected;
     }
 
     /// <summary>
-    /// Garantiza que si se pidió cobertura general, al menos exista un segmento completo seleccionado.
-    /// </summary>
-    private void EnsureAtLeastOneGeneralChunkIfNeeded(
-        IReadOnlyList<TrackSurfaceChunkDefinition> chunks,
-        bool[] selected,
-        float totalDistance,
-        float safeStartLength,
-        float safeEndLength)
-    {
-        if (generalCoverageRatio <= 0f || generalBarrierChance <= 0f)
-        {
-            return;
-        }
-
-        for (int i = 0; i < selected.Length; i++)
-        {
-            if (selected[i] && !IsSafeChunk(chunks[i], totalDistance, safeStartLength, safeEndLength))
-            {
-                return;
-            }
-        }
-
-        for (int i = 0; i < chunks.Count; i++)
-        {
-            TrackSurfaceChunkDefinition chunk = chunks[i];
-
-            if (!IsChunkValidForBarrier(chunk))
-            {
-                continue;
-            }
-
-            if (IsSafeChunk(chunk, totalDistance, safeStartLength, safeEndLength))
-            {
-                continue;
-            }
-
-            selected[i] = true;
-            return;
-        }
-    }
-
-    /// <summary>
-    /// Construye runs continuos de chunks seleccionados para evitar cortes internos.
+    /// Construye runs continuos de chunks seleccionados.
     /// </summary>
     private static List<TrackBarrierRun> BuildRuns(bool[] selectedChunks)
     {
@@ -443,19 +518,11 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
 
         if (usePrimitiveCylindricalBarrierColliders)
         {
-            CreateCylindricalBarrierPrimitiveColliders(
-                chunks,
-                run,
-                side,
-                barrierObject.transform);
+            CreateCylindricalBarrierPrimitiveColliders(chunks, run, side, barrierObject.transform);
 
             if (generateCylindricalBarrierEndPosts)
             {
-                CreateCylindricalBarrierEndPostColliders(
-                    chunks,
-                    run,
-                    side,
-                    barrierObject.transform);
+                CreateCylindricalBarrierEndPostColliders(chunks, run, side, barrierObject.transform);
             }
 
             return;
@@ -475,11 +542,7 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
         TrackBarrierSide side,
         Transform parent)
     {
-        List<Vector3> centers = CollectCylindricalBarrierCenters(
-            chunks,
-            run.StartIndex,
-            run.EndIndex,
-            side);
+        List<Vector3> centers = CollectCylindricalBarrierCenters(chunks, run.StartIndex, run.EndIndex, side);
 
         if (centers.Count < 2)
         {
@@ -519,11 +582,7 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
         TrackBarrierSide side,
         Transform parent)
     {
-        List<Vector3> centers = CollectCylindricalBarrierCenters(
-            chunks,
-            run.StartIndex,
-            run.EndIndex,
-            side);
+        List<Vector3> centers = CollectCylindricalBarrierCenters(chunks, run.StartIndex, run.EndIndex, side);
 
         if (centers.Count < 2)
         {
@@ -532,27 +591,17 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
 
         float radius = ResolvePhysicalBarrierRadius();
 
-        CreateVerticalPostCollider(
-            parent,
-            centers[0],
-            radius,
+        CreateVerticalPostCollider(parent, centers[0], radius,
             $"CylindricalBarrierStartPostCollider_{side}_{run.StartIndex:D3}");
 
-        CreateVerticalPostCollider(
-            parent,
-            centers[centers.Count - 1],
-            radius,
+        CreateVerticalPostCollider(parent, centers[centers.Count - 1], radius,
             $"CylindricalBarrierEndPostCollider_{side}_{run.EndIndex:D3}");
     }
 
     /// <summary>
-    /// Crea un CapsuleCollider vertical desde la base de la pista hasta el centro visual de la barrera.
+    /// Crea un CapsuleCollider vertical desde la base del track hasta el centro visual de la barrera.
     /// </summary>
-    private void CreateVerticalPostCollider(
-        Transform parent,
-        Vector3 topCenter,
-        float radius,
-        string objectName)
+    private void CreateVerticalPostCollider(Transform parent, Vector3 topCenter, float radius, string objectName)
     {
         float bottomY = topCenter.y - cylindricalBarrierVerticalOffset + cylindricalBarrierPostBaseVerticalOffset;
         Vector3 bottomCenter = new Vector3(topCenter.x, bottomY, topCenter.z);
@@ -565,13 +614,7 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
             return;
         }
 
-        CreateCapsuleColliderSegment(
-            parent,
-            bottomCenter,
-            topCenter,
-            radius,
-            segmentLength,
-            objectName);
+        CreateCapsuleColliderSegment(parent, bottomCenter, topCenter, radius, segmentLength, objectName);
     }
 
     /// <summary>
@@ -634,19 +677,17 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
             return;
         }
 
-        for (int iteration = 0; iteration < iterations; iteration++)
+        for (int iter = 0; iter < iterations; iter++)
         {
-            List<Vector3> copy = new List<Vector3>(centers);
-
             for (int i = 1; i < centers.Count - 1; i++)
             {
-                centers[i] = (copy[i - 1] + copy[i] + copy[i + 1]) / 3f;
+                centers[i] = (centers[i - 1] + centers[i] + centers[i + 1]) / 3f;
             }
         }
     }
 
     /// <summary>
-    /// Crea un CapsuleCollider alineado entre dos puntos.
+    /// Crea un CapsuleCollider entre dos puntos del espacio.
     /// </summary>
     private void CreateCapsuleColliderSegment(
         Transform parent,
@@ -656,22 +697,25 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
         float segmentLength,
         string objectName)
     {
-        GameObject colliderObject = new GameObject(objectName);
-        AssignLayer(colliderObject);
+        Vector3 direction = (end - start).normalized;
+        Vector3 midPoint = (start + end) * 0.5f;
 
-        Vector3 segment = end - start;
-        Vector3 direction = segment.normalized;
-        Vector3 center = (start + end) * 0.5f;
+        GameObject capsuleObject = new GameObject(objectName);
+        AssignLayer(capsuleObject);
+        capsuleObject.transform.SetParent(parent);
+        capsuleObject.transform.position = midPoint;
+        capsuleObject.transform.rotation = ResolveCapsuleRotation(direction);
+        capsuleObject.transform.localScale = Vector3.one;
 
-        colliderObject.transform.position = center;
-        colliderObject.transform.rotation = ResolveCapsuleRotation(direction);
-        colliderObject.transform.SetParent(parent, true);
+        CapsuleCollider capsule = capsuleObject.AddComponent<CapsuleCollider>();
+        capsule.radius = radius;
+        capsule.height = segmentLength + radius * 2f;
+        capsule.direction = 2; // Z-axis
 
-        CapsuleCollider capsuleCollider = colliderObject.AddComponent<CapsuleCollider>();
-        capsuleCollider.direction = 2;
-        capsuleCollider.radius = radius;
-        capsuleCollider.height = segmentLength + radius * 2f;
-        capsuleCollider.sharedMaterial = cylindricalBarrierPhysicMaterial;
+        if (cylindricalBarrierPhysicMaterial != null)
+        {
+            capsule.sharedMaterial = cylindricalBarrierPhysicMaterial;
+        }
     }
 
     #endregion
@@ -679,11 +723,9 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
     #region Build Start Wall
 
     /// <summary>
-    /// Construye una pared inicial independiente al comienzo del nivel.
+    /// Construye la pared inicial independiente al comienzo del nivel.
     /// </summary>
-    private void BuildStartWall(
-        IReadOnlyList<TrackSurfaceChunkDefinition> chunks,
-        Transform root)
+    private void BuildStartWall(IReadOnlyList<TrackSurfaceChunkDefinition> chunks, Transform root)
     {
         if (!TryGetFirstValidSample(chunks, out TrackLayoutSamplePoint firstSample))
         {
@@ -714,6 +756,7 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
             Mathf.Max(0.01f, startWallThickness));
 
         MeshRenderer meshRenderer = wallObject.GetComponent<MeshRenderer>();
+
         if (meshRenderer != null)
         {
             meshRenderer.sharedMaterial = startWallMaterial;
@@ -796,10 +839,7 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
     /// <summary>
     /// Indica si un chunk cruza un rango de distancia.
     /// </summary>
-    private static bool ChunkOverlapsRange(
-        TrackSurfaceChunkDefinition chunk,
-        float rangeStart,
-        float rangeEnd)
+    private static bool ChunkOverlapsRange(TrackSurfaceChunkDefinition chunk, float rangeStart, float rangeEnd)
     {
         if (chunk == null)
         {
@@ -840,32 +880,6 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
         }
 
         return chunks[chunks.Count - 1].EndDistance;
-    }
-
-    /// <summary>
-    /// Resuelve longitud efectiva de zona segura inicial.
-    /// </summary>
-    private float ResolveSafeStartLength(float totalDistance)
-    {
-        if (levelGenerationSettings != null && levelGenerationSettings.SafeStartLengthOverride > 0f)
-        {
-            return Mathf.Min(levelGenerationSettings.SafeStartLengthOverride, totalDistance);
-        }
-
-        return 0f;
-    }
-
-    /// <summary>
-    /// Resuelve longitud efectiva de zona segura final.
-    /// </summary>
-    private float ResolveSafeEndLength(float totalDistance)
-    {
-        if (levelGenerationSettings != null && levelGenerationSettings.SafeEndLengthOverride > 0f)
-        {
-            return Mathf.Min(levelGenerationSettings.SafeEndLengthOverride, totalDistance);
-        }
-
-        return 0f;
     }
 
     /// <summary>
@@ -951,12 +965,9 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
         }
 
         horizontalForward.Normalize();
-
         Vector3 resolvedRight = Vector3.Cross(Vector3.up, horizontalForward);
 
-        return resolvedRight.sqrMagnitude < 0.0001f
-            ? Vector3.right
-            : resolvedRight.normalized;
+        return resolvedRight.sqrMagnitude < 0.0001f ? Vector3.right : resolvedRight.normalized;
     }
 
     /// <summary>
@@ -964,9 +975,7 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
     /// </summary>
     private static Vector3 ResolveSafeForward(Vector3 forward)
     {
-        return forward.sqrMagnitude >= 0.0001f
-            ? forward.normalized
-            : Vector3.forward;
+        return forward.sqrMagnitude >= 0.0001f ? forward.normalized : Vector3.forward;
     }
 
     /// <summary>
@@ -997,7 +1006,7 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
     }
 
     /// <summary>
-    /// Valida valores configurables del inspector.
+    /// Valida valores configurables del Inspector.
     /// </summary>
     private void ValidateInspectorData()
     {
@@ -1013,15 +1022,11 @@ public sealed class TrackBarrierGenerator : MonoBehaviour
         cylindricalBarrierRadialSegments = Mathf.Max(3, cylindricalBarrierRadialSegments);
         cylindricalBarrierLateralOffset = Mathf.Max(0f, cylindricalBarrierLateralOffset);
         cylindricalBarrierSmoothingIterations = Mathf.Max(0, cylindricalBarrierSmoothingIterations);
-
         cylindricalBarrierPostBaseVerticalOffset = Mathf.Max(0f, cylindricalBarrierPostBaseVerticalOffset);
-
         cylindricalBarrierColliderRadiusMultiplier = Mathf.Max(0.1f, cylindricalBarrierColliderRadiusMultiplier);
         minimumCylindricalBarrierColliderRadius = Mathf.Max(0.01f, minimumCylindricalBarrierColliderRadius);
-
         startWallHeight = Mathf.Max(0.01f, startWallHeight);
         startWallThickness = Mathf.Max(0.01f, startWallThickness);
-
         generalBarrierChance = Mathf.Clamp01(generalBarrierChance);
         generalCoverageRatio = Mathf.Clamp01(generalCoverageRatio);
     }

@@ -563,7 +563,8 @@ public sealed class TrackRuleEvaluator
 
         if (selectedFeature == TrackFeatureType.SlopeUp || selectedFeature == TrackFeatureType.SlopeDown)
         {
-            return CreateVerticalDecision(selectedFeature, state, profile, random, minTrackHeight, maxTrackHeight);
+            // CAMBIO: se pasa levelSettings para aplicar el override de pendiente por progresión.
+            return CreateVerticalDecision(selectedFeature, state, profile, levelSettings, random, minTrackHeight, maxTrackHeight);
         }
 
         if (selectedFeature == TrackFeatureType.NarrowStart)
@@ -670,56 +671,61 @@ public sealed class TrackRuleEvaluator
             0f);
     }
 
-/// <summary>
-/// Crea una decisión vertical con delta aleatorio dentro del rango válido,
-/// respetando el ángulo máximo configurado en el perfil.
-///
-/// El delta máximo por ángulo se calcula como:
-///   maxDelta = changeLength × tan(maxSlopeAngleDegrees)
-/// Esto limita el ángulo GLOBAL (inicio a fin de la sección).
-/// La zona media de la transición puede ser algo más empinada.
-/// </summary>
-private TrackGenerationDecision CreateVerticalDecision(
-    TrackFeatureType featureType,
-    TrackGenerationState state,
-    TrackGenerationProfile profile,
-    System.Random random,
-    float minTrackHeight,
-    float maxTrackHeight)
-{
-    float requestedDelta = RandomRange(profile.SlopeHeightStepMin, profile.SlopeHeightStepMax, random);
-    float changeLength = RandomSolidLength(profile, random);
-
-    // Calcular el delta máximo permitido por el ángulo configurado
-    float maxDeltaByAngle = changeLength * Mathf.Tan(profile.MaxSlopeAngleDegrees * Mathf.Deg2Rad);
-
-    float finalDelta;
-
-    if (featureType == TrackFeatureType.SlopeUp)
+    /// <summary>
+    /// Crea una decisión vertical con delta aleatorio dentro del rango desbloqueado por progresión.
+    ///
+    /// El techo efectivo del delta crece con la progresión:
+    ///   techo = Lerp(startSlopeHeightStepMax, profile.SlopeHeightStepMax, t)
+    /// El generador elige aleatoriamente en [profile.SlopeHeightStepMin, techo],
+    /// por lo que incluso en dificultad máxima puede salir una pendiente suave.
+    /// </summary>
+    private TrackGenerationDecision CreateVerticalDecision(
+        TrackFeatureType featureType,
+        TrackGenerationState state,
+        TrackGenerationProfile profile,
+        LevelGenerationSettings levelSettings,
+        System.Random random,
+        float minTrackHeight,
+        float maxTrackHeight)
     {
-        float allowedMax = Mathf.Max(0f, maxTrackHeight - state.CurrentHeight);
-        finalDelta = Mathf.Min(requestedDelta, allowedMax);
-        finalDelta = Mathf.Min(finalDelta, maxDeltaByAngle); // clampar por ángulo
-    }
-    else
-    {
-        float allowedMax = Mathf.Max(0f, state.CurrentHeight - minTrackHeight);
-        finalDelta = Mathf.Min(requestedDelta, allowedMax);
-        finalDelta = Mathf.Min(finalDelta, maxDeltaByAngle); // clampar por ángulo
-        finalDelta *= -1f;
-    }
+        float effectiveSlopeMax = levelSettings.HasSlopeHeightStepMaxOverride
+            ? Mathf.Clamp(levelSettings.SlopeHeightStepMaxOverride,
+                          profile.SlopeHeightStepMin,
+                          profile.SlopeHeightStepMax)
+            : profile.SlopeHeightStepMax;
 
-    return new TrackGenerationDecision(
-        featureType,
-        changeLength,
-        profile.MinStraightAfterVerticalChange,
-        state.CurrentWidthRatio,
-        finalDelta,
-        0f,
-        0f,
-        0f,
-        0f);
-}
+        float requestedDelta = RandomRange(profile.SlopeHeightStepMin, effectiveSlopeMax, random);
+        float changeLength = RandomSolidLength(profile, random);
+
+        float maxDeltaByAngle = changeLength * Mathf.Tan(profile.MaxSlopeAngleDegrees * Mathf.Deg2Rad);
+
+        float finalDelta;
+
+        if (featureType == TrackFeatureType.SlopeUp)
+        {
+            float allowedMax = Mathf.Max(0f, maxTrackHeight - state.CurrentHeight);
+            finalDelta = Mathf.Min(requestedDelta, allowedMax);
+            finalDelta = Mathf.Min(finalDelta, maxDeltaByAngle);
+        }
+        else
+        {
+            float allowedMax = Mathf.Max(0f, state.CurrentHeight - minTrackHeight);
+            finalDelta = Mathf.Min(requestedDelta, allowedMax);
+            finalDelta = Mathf.Min(finalDelta, maxDeltaByAngle);
+            finalDelta *= -1f;
+        }
+
+        return new TrackGenerationDecision(
+            featureType,
+            changeLength,
+            profile.MinStraightAfterVerticalChange,
+            state.CurrentWidthRatio,
+            finalDelta,
+            0f,
+            0f,
+            0f,
+            0f);
+    }
 
     /// <summary>
     /// Crea una decisión de inicio de estrechamiento.

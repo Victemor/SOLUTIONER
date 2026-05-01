@@ -152,6 +152,15 @@ public sealed class TrackContentGenerationProfile : ScriptableObject
     [Tooltip("Offset vertical aplicado al prefab de meta.")]
     [SerializeField] private float goalVerticalOffset;
 
+    [Header("Infinite Progression — Máximos")]
+    [Tooltip("Cantidad máxima de obstáculos (cajas + muros + pelotas + ventiladores) " +
+            "que se pueden generar en el nivel de máxima dificultad.\n" +
+            "0 = sin límite.")]
+    [SerializeField] private int baseMaxObstacleCount = 30;
+    
+    [Tooltip("Cantidad máxima de monedas en el nivel de máxima dificultad.\n" +
+            "El valor mínimo inicial se configura en InfiniteProgressionSettings.StartCoinCount.")]
+    [SerializeField] private int baseMaxCoinCount = 40;
     public IReadOnlyList<TrackSpawnPrefabEntry> BoxPrefabs => boxPrefabs;
     public IReadOnlyList<TrackSpawnPrefabEntry> WallPrefabs => wallPrefabs;
     public IReadOnlyList<TrackSpawnPrefabEntry> BallPrefabs => ballPrefabs;
@@ -201,6 +210,9 @@ public sealed class TrackContentGenerationProfile : ScriptableObject
     public float CoinPatternDistanceSpacing => Mathf.Max(0.25f, coinPatternDistanceSpacing);
     public float CoinPatternLateralAmplitude => Mathf.Max(0f, coinPatternLateralAmplitude);
 
+    public int BaseMaxObstacleCount => Mathf.Max(0, baseMaxObstacleCount);
+    public int BaseMaxCoinCount => Mathf.Max(0, baseMaxCoinCount);
+
     public float GoalVerticalOffset => goalVerticalOffset;
 
     private void OnValidate()
@@ -238,6 +250,9 @@ public sealed class TrackContentGenerationProfile : ScriptableObject
         NormalizeEntries(ballPrefabs);
         NormalizeEntries(fanPrefabs);
         NormalizeEntries(coinPrefabs);
+
+        baseMaxObstacleCount = Mathf.Max(0, baseMaxObstacleCount);
+        baseMaxCoinCount = Mathf.Max(0, baseMaxCoinCount);
     }
 
     private static void NormalizeEntries(List<TrackSpawnPrefabEntry> entries)
